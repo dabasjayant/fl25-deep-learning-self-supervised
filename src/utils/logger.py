@@ -9,7 +9,7 @@ from datetime import datetime
 class Logger:
     """Simple logger for training."""
     
-    def __init__(self, log_dir='logs', use_wandb=False):
+    def __init__(self, log_dir='logs', use_wandb=False, wandb_project='fall2025-deep-learning', wandb_run_name=None):
         self.log_dir = log_dir
         self.use_wandb = use_wandb
         
@@ -23,6 +23,13 @@ class Logger:
             try:
                 import wandb
                 self.wandb = wandb
+                # Initialize wandb
+                wandb.init(
+                    project=wandb_project,
+                    name=wandb_run_name,
+                    config={}  # Will be updated with training config
+                )
+                self.log(f"Weights & Biases initialized: project={wandb_project}, run={wandb_run_name}")
             except ImportError:
                 print("wandb not installed, logging locally only")
                 self.use_wandb = False
@@ -40,3 +47,13 @@ class Logger:
         
         if self.use_wandb:
             self.wandb.log(metrics, step=step)
+    
+    def update_config(self, config):
+        """Update wandb config with training configuration."""
+        if self.use_wandb:
+            self.wandb.config.update(config)
+    
+    def finish(self):
+        """Finish wandb run."""
+        if self.use_wandb:
+            self.wandb.finish()

@@ -30,7 +30,12 @@ def get_ssl_transforms(config, is_train=True):
     Returns:
         transform: Composition of transforms
     """
-    image_size = config.get('image_size', 224)
+    # Handle both augmentation config and full config with data.image_size
+    if 'image_size' in config:
+        image_size = config.get('image_size', 96)
+    else:
+        # Fallback to default or nested config
+        image_size = config.get('data', {}).get('image_size', 96)
     
     if is_train:
         # Strong augmentations for SSL

@@ -17,56 +17,29 @@ import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
-
-from models import build_model
-from ssl_methods import build_ssl_method
-from data import get_dataloader
-from utils.train_utils import AverageMeter, save_checkpoint, load_checkpoint, adjust_learning_rate
-from utils.logger import Logger
+# Import from src package
+from src.models import build_model
+from src.ssl import build_ssl_method
+from src.data import get_dataloader
+from src.utils.train_utils import AverageMeter, save_checkpoint, load_checkpoint, adjust_learning_rate
+from src.utils.logger import Logger
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="SSL Training")
     
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to configuration file"
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default=None,
-        help="Path to data directory (overrides config)"
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-        help="Number of training epochs (overrides config)"
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=None,
-        help="Batch size per GPU (overrides config)"
-    )
-    parser.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        help="Path to checkpoint to resume from"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default='cuda' if torch.cuda.is_available() else 'cpu',
-        help="Device to use for training"
-    )
+    parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
+    parser.add_argument("--data_dir", type=str, default=None, help="Path to data directory (overrides config)")
+    parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs (overrides config)")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size per GPU (overrides config)")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (overrides config)")
+    parser.add_argument("--output_dir", type=str, default='checkpoints', help='Directory to save model checkpoints.')
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--device", type=str, default='cuda', help="Device to use for training")
+    parser.add_argument("--wandb", action='store_true', help='Log training to Weights & Biases')
+    parser.add_argument("--wandb_project", type=str, default='fall2025-deep-learning', help='Weights & Biases project name')
+    parser.add_argument("--wandb_run_name", type=str, default=None, help='Optional run name for Weights & Biases')
     
     return parser.parse_args()
 
@@ -140,13 +113,24 @@ def main():
         config['training']['epochs'] = args.epochs
     if args.batch_size:
         config['training']['batch_size'] = args.batch_size
+    if args.lr:
+        config['training']['learning_rate'] = args.lr
+    if args.output_dir:
+        config['checkpoint']['save_dir'] = args.output_dir
     if args.resume:
         config['checkpoint']['resume'] = args.resume
+    if args.wandb:
+        config['logging']['use_wandb'] = True
+        config['logging']['wandb_project'] = args.wandb_project
+        if args.wandb_run_name:
+            config['logging']['wandb_run_name'] = args.wandb_run_name
     
     # Setup logging
     logger = Logger(
         log_dir=config['logging']['log_dir'],
-        use_wandb=config['logging'].get('use_wandb', False)
+        use_wandb=config['logging'].get('use_wandb', False),
+        wandb_project=config['logging'].get('wandb_project', 'fall2025-deep-learning'),
+        wandb_run_name=config['logging'].get('wandb_run_name', config.get('experiment_name', 'unnamed'))
     )
     
     logger.log("=" * 60)
@@ -158,6 +142,10 @@ def main():
     logger.log(f"Dataset: {config['data']['dataset']}")
     logger.log(f"Device: {args.device}")
     logger.log("=" * 60)
+    
+    # Update wandb config if using wandb
+    if config['logging'].get('use_wandb', False):
+        logger.update_config(config)
     
     # Build model
     logger.log("Building model...")
@@ -191,9 +179,13 @@ def main():
     
     # Load checkpoint if resuming
     start_epoch = 0
+    best_loss = float('inf')
     if config['checkpoint'].get('resume'):
-        start_epoch = load_checkpoint(
-            model, optimizer, config['checkpoint']['resume']
+        start_epoch, best_loss = load_checkpoint(
+            config['checkpoint']['resume'],
+            model,
+            optimizer,
+            scheduler=None
         )
     
     # Setup data loader
@@ -254,6 +246,9 @@ def main():
     logger.log("\n" + "=" * 60)
     logger.log("Training completed!")
     logger.log("=" * 60)
+    
+    # Finish wandb run
+    logger.finish()
 
 
 if __name__ == "__main__":

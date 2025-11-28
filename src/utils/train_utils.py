@@ -27,11 +27,17 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-def save_checkpoint(state, filename='checkpoint.pth'):
+def save_checkpoint(state, filename='checkpoint.pth', is_best=False):
     """Save checkpoint to disk."""
     filepath = Path(filename)
     filepath.parent.mkdir(parents=True, exist_ok=True)
     torch.save(state, filepath)
+    print(f"Checkpoint saved: {filepath}")
+    
+    if is_best:
+        best_path = filepath.parent / 'checkpoint_best.pth'
+        torch.save(state, best_path)
+        print(f"Best checkpoint saved: {best_path}")
 
 
 def load_checkpoint(filename, model, optimizer=None, scheduler=None):

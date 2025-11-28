@@ -8,7 +8,7 @@
 set -e  # Exit on error
 
 # Configuration
-OVERLAY_SIZE="50G-10M"  # 50GB with 10M inodes
+OVERLAY_SIZE="50GB-10M"  # 50GB with 10M inodes - matches Greene template naming
 OVERLAY_NAME="ssl_env.ext3"
 CONDA_ENV_NAME="ssl_env"
 PYTHON_VERSION="3.10"
@@ -19,20 +19,14 @@ OVERLAY_PATH="${SCRATCH}/${OVERLAY_NAME}"
 OVERLAY_SOURCE="/scratch/work/public/overlay-fs-ext3/overlay-${OVERLAY_SIZE}.ext3.gz"
 SINGULARITY_IMG="/scratch/work/public/singularity/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif"
 
-echo "=========================================="
-echo "SSL Environment Setup for NYU Greene HPC"
-echo "=========================================="
-echo ""
-echo "This script will:"
+echo "SSL Environment Setup"
 echo "  1. Copy and extract the overlay filesystem"
 echo "  2. Install Miniconda in the overlay"
 echo "  3. Create a conda environment with SSL dependencies"
-echo ""
 echo "Configuration:"
 echo "  - Overlay: ${OVERLAY_PATH}"
 echo "  - Conda env: ${CONDA_ENV_NAME}"
 echo "  - Python: ${PYTHON_VERSION}"
-echo ""
 
 # Check if running in an interactive session
 if [ -z "${SLURM_JOB_ID}" ]; then
@@ -50,7 +44,7 @@ if [ -z "${SLURM_JOB_ID}" ]; then
     fi
 fi
 
-# Step 1: Create and extract overlay
+# Create and extract overlay
 echo ""
 echo "Step 1: Setting up overlay filesystem..."
 if [ -f "${OVERLAY_PATH}" ]; then
@@ -73,7 +67,7 @@ if [ ! -f "${OVERLAY_PATH}" ]; then
     echo "  Overlay created at ${OVERLAY_PATH}"
 fi
 
-# Step 2: Install Miniconda and create environment
+# Install Miniconda and create environment
 echo ""
 echo "Step 2: Installing Miniconda and creating conda environment..."
 echo ""
@@ -145,8 +139,9 @@ pip install --quiet \
     jupyter \
     huggingface_hub \
     datasets \
-    ipykernel
-    ipywidgets
+    ipykernel \
+    ipywidgets \
+    pillow
 
 echo ""
 echo "  Packages installed successfully!"
@@ -154,18 +149,11 @@ echo ""
 echo "Installed packages:"
 conda list | grep -E "torch|numpy|pandas|wandb|tensorboard"
 
-echo ""
-echo "=========================================="
 echo "Setup Complete!"
-echo "=========================================="
-echo ""
 echo "Your environment is ready. To use it:"
-echo ""
 echo "1. In interactive sessions:"
 echo "   module load cuda/12.1.1 cudnn/8.9.7.29-cuda12 anaconda3/2023.09"
 echo "   source /share/apps/anaconda3/2023.09/etc/profile.d/conda.sh"
 echo "   conda activate ssl_env"
-echo ""
 echo "2. In SLURM jobs:"
 echo "   Use the train_ssl script which handles module loading automatically"
-echo ""

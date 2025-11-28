@@ -80,17 +80,22 @@ def get_dataset(config, is_train=True):
     Get dataset for SSL training.
     
     Args:
-        config: Configuration dict
+        config: Configuration dict (full config with 'data' key)
         is_train: Whether to get training or validation set
         
     Returns:
         dataset: PyTorch dataset
     """
-    dataset_name = config.get('dataset', 'fall2025_deeplearning').lower()
-    data_root = config.get('data_root', '/scratch/${USER}/data/fall2025_deeplearning')
+    data_config = config.get('data', config)  # Handle both full config and data config
+    dataset_name = data_config.get('dataset', 'fall2025_deeplearning').lower()
+    data_root = data_config.get('data_root', '/scratch/${USER}/data/fall2025_deeplearning')
+    
+    # Build augmentation config with image_size from data config
+    augmentation_config = config.get('augmentation', {}).copy()
+    augmentation_config['image_size'] = data_config.get('image_size', 96)
     
     # Get transforms
-    transform = get_ssl_transforms(config.get('augmentation', {}), is_train)
+    transform = get_ssl_transforms(augmentation_config, is_train)
     
     # For SSL training, apply two crops
     if is_train:

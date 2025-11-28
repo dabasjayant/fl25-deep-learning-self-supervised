@@ -8,7 +8,7 @@
 set -e  # Exit on error
 
 # Configuration
-OVERLAY_SIZE="50GB-10M"  # 50GB with 10M inodes - matches Greene template naming
+OVERLAY_SIZE="50G-10M"  # 50GB with 10M inodes
 OVERLAY_NAME="ssl_env.ext3"
 CONDA_ENV_NAME="ssl_env"
 PYTHON_VERSION="3.10"
@@ -117,8 +117,8 @@ echo "  Installing packages (this may take several minutes)..."
 source /ext3/env.sh
 conda activate ${CONDA_ENV_NAME}
 
-# Install PyTorch with CUDA support
-pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch with CUDA support (skip torchaudio as it's not needed for vision tasks)
+pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Install common deep learning packages
 pip install --quiet \
@@ -149,11 +149,14 @@ echo ""
 echo "Installed packages:"
 conda list | grep -E "torch|numpy|pandas|wandb|tensorboard"
 
+SINGULARITY_SCRIPT
+
+echo ""
 echo "Setup Complete!"
-echo "Your environment is ready. To use it:"
-echo "1. In interactive sessions:"
-echo "   module load cuda/12.1.1 cudnn/8.9.7.29-cuda12 anaconda3/2023.09"
-echo "   source /share/apps/anaconda3/2023.09/etc/profile.d/conda.sh"
-echo "   conda activate ssl_env"
-echo "2. In SLURM jobs:"
-echo "   Use the train_ssl script which handles module loading automatically"
+echo "Your environment is ready. To use it in future sessions:"
+echo ""
+echo "singularity exec --nv \\"
+echo "    --overlay /scratch/\${USER}/ssl_env.ext3:ro \\"
+echo "    /scratch/work/public/singularity/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif \\"
+echo "    /bin/bash -c 'source /ext3/env.sh && conda activate ssl_env && <your command>'"
+echo ""

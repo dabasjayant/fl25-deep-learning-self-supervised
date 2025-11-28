@@ -22,4 +22,4 @@ Deep Learning course final project on self-supervised learning.
 2. Choose a config: `configs/simclr_resnet18_cifar10.yaml`
 3. Train: `python train.py --config configs/simclr_resnet18_cifar10.yaml`
 
-See `experiments/README.md` for comprehensive documentation.
+See `experiments/README.md` for experiment documentation.

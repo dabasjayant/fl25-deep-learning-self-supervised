@@ -1,7 +1,5 @@
 # Self-Supervised Learning Framework
 
-A flexible framework for experimenting with different self-supervised learning (SSL) methods and architectures.
-
 ## Project Structure
 
 ```
@@ -13,8 +11,6 @@ fl25-deep-learning-self-supervised/
 │   │   └── builder.py       # Model factory
 │   ├── ssl_methods/         # SSL training methods
 │   │   ├── simclr.py        # SimCLR
-│   │   ├── moco.py          # MoCo (Momentum Contrast)
-│   │   ├── byol.py          # BYOL (Bootstrap Your Own Latent)
 │   │   └── builder.py       # SSL method factory
 │   ├── data/                # Data loading and augmentation
 │   │   ├── datasets.py      # Dataset loaders
@@ -23,9 +19,7 @@ fl25-deep-learning-self-supervised/
 │       ├── train_utils.py   # Training helpers
 │       └── logger.py        # Logging utilities
 ├── configs/                 # Experiment configurations
-│   ├── simclr_resnet18_cifar10.yaml
-│   ├── moco_resnet50_stl10.yaml
-│   └── byol_vit_cifar100.yaml
+│   ├── simclr_resnet18.yaml
 ├── experiments/             # Results and analysis
 ├── train.py                 # Main training script
 ├── train_ssl                # HPC job submission script
@@ -41,14 +35,9 @@ fl25-deep-learning-self-supervised/
 
 ### SSL Methods
 - **SimCLR**: Contrastive learning with NT-Xent loss
-- **MoCo**: Momentum contrast with queue of negative samples
-- **BYOL**: Self-supervised learning without negative pairs
 
 ### Datasets
-- CIFAR-10, CIFAR-100
-- STL-10
-- ImageNet (requires manual download)
-
+- Hugging Face: https://huggingface.co/datasets/tsbpp/fall2025_deeplearning
 ## Quick Start
 
 ### 1. Setup Environment (Local)
@@ -83,13 +72,7 @@ bash env.sh
 **Local training:**
 ```bash
 # Train SimCLR with ResNet-18 on CIFAR-10
-python train.py --config configs/simclr_resnet18_cifar10.yaml
-
-# Train MoCo with ResNet-50 on STL-10
-python train.py --config configs/moco_resnet50_stl10.yaml
-
-# Train BYOL with ViT on CIFAR-100
-python train.py --config configs/byol_vit_cifar100.yaml
+python train.py --config configs/simclr_resnet18.yaml
 ```
 
 **HPC training:**
@@ -116,17 +99,17 @@ model:
   name: "resnet18"              # or "resnet50", "vit"
   
 ssl:
-  method: "simclr"              # or "moco", "byol"
-  temperature: 0.5
-  projection_dim: 128
+  method: "simclr"              
+  temperature:
+  projection_dim:
   
 data:
-  dataset: "cifar10"
+  dataset: "fall2025_deeplearning"
   batch_size: 256
   
 training:
-  epochs: 200
-  learning_rate: 0.3
+  epochs:
+  learning_rate:
 ```
 
 ### 2. Run Your Experiment

@@ -1,10 +1,10 @@
 """
-Dataset loaders.
+Dataset loaders for Fall 2025 Deep Learning course.
+Only supports the tsbpp/fall2025_deeplearning dataset from Hugging Face.
 """
 
 import torch
 import os
-from torchvision import datasets
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 from .transforms import get_ssl_transforms, TwoCropsTransform
@@ -86,8 +86,8 @@ def get_dataset(config, is_train=True):
     Returns:
         dataset: PyTorch dataset
     """
-    dataset_name = config.get('dataset', 'cifar10').lower()
-    data_root = config.get('data_root', './data')
+    dataset_name = config.get('dataset', 'fall2025_deeplearning').lower()
+    data_root = config.get('data_root', '/scratch/${USER}/data/fall2025_deeplearning')
     
     # Get transforms
     transform = get_ssl_transforms(config.get('augmentation', {}), is_train)
@@ -103,44 +103,8 @@ def get_dataset(config, is_train=True):
             split=split,
             transform=transform
         )
-    elif dataset_name == 'cifar10':
-        dataset = datasets.CIFAR10(
-            root=data_root,
-            train=is_train,
-            transform=transform,
-            download=True
-        )
-    elif dataset_name == 'cifar100':
-        dataset = datasets.CIFAR10(
-            root=data_root,
-            train=is_train,
-            transform=transform,
-            download=True
-        )
-    elif dataset_name == 'cifar100':
-        dataset = datasets.CIFAR100(
-            root=data_root,
-            train=is_train,
-            transform=transform,
-            download=True
-        )
-    elif dataset_name == 'stl10':
-        split = 'train+unlabeled' if is_train else 'test'
-        dataset = datasets.STL10(
-            root=data_root,
-            split=split,
-            transform=transform,
-            download=True
-        )
-    elif dataset_name == 'imagenet':
-        # For ImageNet, assumes data is already downloaded
-        split = 'train' if is_train else 'val'
-        dataset = datasets.ImageFolder(
-            root=f"{data_root}/imagenet/{split}",
-            transform=transform
-        )
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
+        raise ValueError(f"Unknown dataset: {dataset_name}. Only 'fall2025_deeplearning' is supported.")
     
     return dataset
 

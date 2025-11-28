@@ -1,6 +1,6 @@
 # NYU Greene HPC Setup for Self-Supervised Learning
 
-## Quick Start with Singularity (Recommended by NYU)
+## Quick Start with Singularity 
 
 NYU HPC recommends using Singularity containers with overlays for reproducible environments. This approach is robust to spot instance preemptions.
 
@@ -15,7 +15,7 @@ srun --account=csci-ga-2572-2025fa --partition=n1s8-t4-1 \
      --nodes=1 --cpus-per-task=4 --mem=32GB --time=02:00:00 \
      --gres=gpu:1 --pty /bin/bash
 
-# Clone your repository to scratch
+# Clone repo to scratch
 cd /scratch/${USER}
 git clone <your-repo-url> fl25-deep-learning-self-supervised
 cd fl25-deep-learning-self-supervised
@@ -45,7 +45,7 @@ bash download_dataset.sh
 "
 ```
 
-### Step 3: Start Training
+### Step 3: Training
 
 ```bash
 # Submit training job
@@ -55,25 +55,15 @@ sbatch train_ssl
 tail -f logs/train_<job_id>.out
 ```
 
-## Spot Instance Resilience
-
-Your jobs are configured with `#SBATCH --requeue` to automatically restart if preempted by spot instance termination.
-
-**Key Features:**
-- ✅ Automatic checkpointing every epoch (saves to `/scratch/${USER}/checkpoints`)
-- ✅ Always saves `checkpoint_latest.pth` for resuming after preemption
-- ✅ Saves `checkpoint_best.pth` for best model
-- ✅ Periodic checkpoints every N epochs (configurable)
-
 **To resume training after preemption:**
 
-Edit your config file and set:
+Edit config file and set:
 ```yaml
 checkpoint:
   resume: "/scratch/${USER}/checkpoints/<experiment_name>/checkpoint_latest.pth"
 ```
 
-## Key Files
+## Files
 
 ### Training Scripts
 - `train_ssl` - Main Slurm batch script for training
@@ -82,7 +72,7 @@ checkpoint:
 - `train.py` - Training script with checkpointing
 
 ### Configuration
-- `configs/simclr_resnet18_fall2025.yaml` - Main config for course dataset
+- `configs/simclr_resnet18_fall2025.yaml` - Main config
 - `configs/simclr_resnet18_cifar10.yaml` - Example config for CIFAR-10
 - Modify configs to experiment with different methods/architectures
 
@@ -112,7 +102,7 @@ scp -rp greene-dtn:/scratch/work/public/singularity/ubuntu-20.04.3.sif .
 scp -rp greene-dtn:/scratch/${USER}/data /scratch/${USER}/
 ```
 
-## Testing Your Setup
+## Test Setup
 
 ```bash
 # Interactive test with Singularity
@@ -148,21 +138,22 @@ python -c "from datasets import load_from_disk; print('datasets library working'
 
 ## Experiment Configuration
 
-Edit YAML configs to experiment:
+The framework is configured to use only the Fall 2025 course dataset:
 
 ```yaml
-# Change SSL method
-ssl:
-  method: "byol"  # or "moco", "simclr"
-
-# Change backbone
-model:
-  name: "resnet50"  # or "resnet18", "vit"
-
-# Change dataset
+# Data configuration
 data:
-  dataset: "fall2025_deeplearning"
+  dataset: "fall2025_deeplearning"  # Only supported dataset
   data_root: "/scratch/${USER}/data/fall2025_deeplearning"
+  image_size: 96  # 96x96x3 images
+
+# SSL method
+ssl:
+  method: "simclr"  # Only SimCLR is currently supported
+  
+# Backbone options
+model:
+  name: "resnet18"  # Options: resnet18, resnet50, vit
 ```
 
-Then submit: `sbatch train_ssl`
+Edit `configs/simclr_resnet18_fall2025.yaml` to change hyperparameters or try different backbones, then: `sbatch train_ssl`

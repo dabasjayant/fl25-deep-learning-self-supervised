@@ -16,7 +16,7 @@ ssl:
   
 # Data configuration
 data:
-  dataset: "fall2025_deeplearning"    # Fall 2025 course dataset
+  dataset: "fall2025_deeplearning"    # Fall 2025 course dataset from Hugging Face
   data_root: "/scratch/${USER}/data/fall2025_deeplearning"  # HPC scratch space
   num_workers: 8                      # DataLoader workers
   image_size: 96                      # Image size 96x96x3

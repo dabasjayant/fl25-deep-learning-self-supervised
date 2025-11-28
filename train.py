@@ -93,22 +93,22 @@ def train_epoch(model, dataloader, optimizer, device, epoch, logger, config):
         if ssl_method == 'simclr':
             z1, z2 = model(img1, img2)
             loss = model.compute_loss(z1, z2)
-        elif ssl_method == 'moco':
-            logits, labels = model(img1, img2)
-            loss = model.compute_loss(logits, labels)
-        elif ssl_method == 'byol':
-            loss = model(img1, img2)
+        # elif ssl_method == 'moco':
+        #     logits, labels = model(img1, img2)
+        #     loss = model.compute_loss(logits, labels)
+        # elif ssl_method == 'byol':
+        #     loss = model(img1, img2)
         else:
-            raise ValueError(f"Unknown SSL method: {ssl_method}")
+            raise ValueError(f"Unknown SSL method: {ssl_method}. Only 'simclr' is currently supported.")
         
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-        # Update target network for BYOL
-        if ssl_method == 'byol':
-            model.update_moving_average()
+        # # Update target network for BYOL (commented out - not using BYOL)
+        # if ssl_method == 'byol':
+        #     model.update_moving_average()
         
         losses.update(loss.item(), img1.size(0))
         

@@ -1,0 +1,58 @@
+# Fall 2025 Deep Learning Dataset - SimCLR with ResNet-18
+# Configuration for training on the course dataset
+
+experiment_name: "simclr_resnet18_fall2025"
+
+# Model configuration
+model:
+  name: "resnet18"                    # Options: resnet18, resnet50, vit
+  num_classes: 10                     # Adjust based on dataset
+
+# SSL method configuration
+ssl:
+  method: "simclr"                    # Options: simclr, moco, byol
+  temperature: 0.5                    # Temperature for contrastive loss
+  projection_dim: 128                 # Projection head output dimension
+  
+# Data configuration
+data:
+  dataset: "fall2025_deeplearning"    # Fall 2025 course dataset
+  data_root: "/scratch/${USER}/data/fall2025_deeplearning"  # HPC scratch space
+  num_workers: 8                      # DataLoader workers
+  image_size: 96                      # Image size 96x96x3
+  
+# Training configuration
+training:
+  epochs: 200                         # Number of training epochs
+  batch_size: 256                     # Batch size per GPU
+  learning_rate: 0.3                  # Base learning rate (will be scaled)
+  weight_decay: 1e-4                  # Weight decay
+  warmup_epochs: 10                   # Learning rate warmup epochs
+  
+# Optimizer configuration
+optimizer:
+  name: "sgd"                         # Options: sgd, adam, adamw
+  momentum: 0.9                       # Momentum for SGD
+  
+# Learning rate scheduler
+scheduler:
+  name: "cosine"                      # Options: cosine, step, linear
+  
+# Augmentation configuration
+augmentation:
+  color_jitter_prob: 0.8              # Probability of color jitter
+  grayscale_prob: 0.2                 # Probability of grayscale
+  gaussian_blur_prob: 0.5             # Probability of Gaussian blur
+  
+# Logging configuration
+logging:
+  log_dir: "logs"                     # Directory for logs
+  log_every_n_steps: 100              # Log frequency
+  save_every_n_epochs: 10             # Checkpoint save frequency
+  use_wandb: false                    # Use Weights & Biases logging
+  wandb_project: "ssl-fall2025"       # W&B project name
+  
+# Checkpoint configuration
+checkpoint:
+  save_dir: "checkpoints"             # Directory to save checkpoints
+  resume: null                        # Path to checkpoint to resume from

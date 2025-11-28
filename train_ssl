@@ -1,0 +1,62 @@
+#!/bin/bash
+#SBATCH --job-name=ssl_training
+#SBATCH --account=csci-ga-2572-2025fa
+#SBATCH --partition=n1s8-t4-1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64GB
+#SBATCH --gres=gpu:a100:1
+#SBATCH --time=12:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+
+# Submit SSL training job
+#
+# Usage:
+#   sbatch train_ssl
+#
+# Prereq:
+#   1. Create conda environment with required packages
+#   2. Ensure training script and data are accessible
+
+echo "SSL Training Job Started"
+echo "Job ID: ${SLURM_JOB_ID}"
+echo "Node: $(hostname)"
+echo "Date: $(date)"
+
+# Create logs directory if it doesn't exist
+mkdir -p logs
+
+# Set up environment variables
+export SCRATCH=/scratch/${USER}
+export PROJECT_DIR=${SCRATCH}/fl25-deep-learning-self-supervised
+
+# Singularity paths (must match env.sh)
+export SINGULARITY_IMAGE=/scratch/work/public/singularity/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif
+export OVERLAY_FILE=${SCRATCH}/ssl_env.ext3
+
+# Check if overlay exists
+if [ ! -f "${OVERLAY_FILE}" ]; then
+    echo "Error: Overlay file not found at ${OVERLAY_FILE}"
+    echo "Please run env.sh first to set up the environment"
+    exit 1
+fi
+
+# Change to project directory
+cd ${PROJECT_DIR}
+
+# Run SSL training script with Singularity
+singularity exec --nv \
+    --overlay ${OVERLAY_FILE}:ro \
+    ${SINGULARITY_IMAGE} \
+    /bin/bash -c "
+source /ext3/env.sh
+conda activate ssl_env
+python train.py \
+    --config configs/simclr_resnet18_fall2025.yaml \
+    --device cuda \
+    --epochs 200 \
+    --batch_size 256
+"
+
+echo "Job completed at: $(date)"

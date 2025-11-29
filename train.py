@@ -1,255 +1,532 @@
+#!/usr/bin/env python3
 """
-Self-Supervised Learning Training Script
-
-Usage:
-    python train.py --config configs/simclr_resnet18_cifar10.yaml
-    
-    # With command line overrides:
-    python train.py --config configs/simclr_resnet18_cifar10.yaml --batch_size 128 --epochs 100
+SimCLR Training Script for Deep Learning Contest
+Usage: python train.py [--epochs NUM] [--batch_size NUM] [--lr FLOAT] [--arch ARCH]
 """
 
 import argparse
 import os
-import sys
-import yaml
+from PIL import Image
+from tqdm import tqdm
+import math
+import numpy as np
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from pathlib import Path
+import torchvision.models as models
+from torchvision import transforms
+from datasets import load_dataset, load_from_disk
+from torch.utils.data import DataLoader, Dataset
 
-# Import from src package
-from src.models import build_model
-from src.ssl import build_ssl_method
-from src.data import get_dataloader
-from src.utils.train_utils import AverageMeter, save_checkpoint, load_checkpoint, adjust_learning_rate
-from src.utils.logger import Logger
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
+# ==============================================================================
+# Dataset Classes
+# ==============================================================================
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="SSL Training")
-    
-    parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
-    parser.add_argument("--data_dir", type=str, default=None, help="Path to data directory (overrides config)")
-    parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs (overrides config)")
-    parser.add_argument("--batch_size", type=int, default=None, help="Batch size per GPU (overrides config)")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (overrides config)")
-    parser.add_argument("--output_dir", type=str, default='checkpoints', help='Directory to save model checkpoints.')
-    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
-    parser.add_argument("--device", type=str, default='cuda', help="Device to use for training")
-    parser.add_argument("--wandb", action='store_true', help='Log training to Weights & Biases')
-    parser.add_argument("--wandb_project", type=str, default='fall2025-deep-learning', help='Weights & Biases project name')
-    parser.add_argument("--wandb_run_name", type=str, default=None, help='Optional run name for Weights & Biases')
-    
-    return parser.parse_args()
+class HFUnlabeledDataset(Dataset):
+    """
+    Wrapper for HuggingFace dataset for SSL pretraining (unlabeled)
+    """
+    def __init__(self, hf_dataset, transform=None):
+        """
+        Args:
+            hf_dataset: HuggingFace dataset split (e.g., dataset['train'])
+            transform: Augmentation pipeline that returns two views
+        """
+        self.hf_dataset = hf_dataset
+        self.transform = transform
 
+    def __len__(self):
+        return len(self.hf_dataset)
 
-def load_config(config_path):
-    """Load YAML configuration file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def train_epoch(model, dataloader, optimizer, device, epoch, logger, config):
-    """Train for one epoch."""
-    model.train()
-    losses = AverageMeter()
-    
-    for batch_idx, (images, _) in enumerate(dataloader):
-        # images is a list of two augmented views
-        img1, img2 = images[0].to(device), images[1].to(device)
+    def __getitem__(self, idx):
+        import time
+        t0 = time.time()
         
-        # Forward pass
-        ssl_method = config['ssl']['method']
+        item = self.hf_dataset[idx]
+        t1 = time.time()
+        image = item['image']
+        t2 = time.time()
+
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+        t3 = time.time()
+
+        image = image.convert('RGB')
+        t4 = time.time()
+
+        if self.transform:
+            view1, view2 = self.transform(image)
+            t5 = time.time()
+            
+            # Only print first 5 and last 5 calls
+            if idx < 5 or idx >= len(self.hf_dataset) - 5:
+                print(f"[idx={idx}] hf_get:{t1-t0:.3f}s, image_type:{t2-t1:.3f}s, fromarray:{t3-t2:.3f}s, convert_rgb:{t4-t3:.3f}s, transform:{t5-t4:.3f}s")
+            
+            return view1, view2
+
+        return image
+
+
+# ==============================================================================
+# Augmentation
+# ==============================================================================
+
+class SimCLRAugmentation:
+    """SimCLR augmentation - optimized for speed"""
+    
+    def __init__(self, image_size=96):
+        # Heavy augmentations
+        self.heavy_aug = A.Compose([
+            A.RandomResizedCrop(
+                size=(image_size, image_size),
+                scale=(0.2, 1.0),
+                p=1.0
+            ),
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(
+                brightness=0.4,
+                contrast=0.4,
+                saturation=0.4,
+                hue=0.1,
+                p=0.8
+            ),
+            A.ToGray(p=0.2),
+        ])
         
-        if ssl_method == 'simclr':
-            z1, z2 = model(img1, img2)
-            loss = model.compute_loss(z1, z2)
-        # elif ssl_method == 'moco':
-        #     logits, labels = model(img1, img2)
-        #     loss = model.compute_loss(logits, labels)
-        # elif ssl_method == 'byol':
-        #     loss = model(img1, img2)
+        # Normalization (applied to all images at end)
+        self.normalize = A.Compose([
+            A.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            ),
+            ToTensorV2()
+        ])
+
+    def __call__(self, image):
+        # Convert PIL to numpy once
+        image = np.array(image)
+        
+        # Apply heavy augmentation twice
+        view1 = self.heavy_aug(image=image)['image']
+        view2 = self.heavy_aug(image=image)['image']
+        
+        # Normalize both
+        view1 = self.normalize(image=view1)['image']
+        view2 = self.normalize(image=view2)['image']
+        
+        return view1, view2
+
+
+# ==============================================================================
+# Model Components
+# ==============================================================================
+
+class Encoder(nn.Module):
+    """Encoder backbone (ResNet without final classification layer)"""
+    
+    def __init__(self, architecture='resnet18'):
+        super().__init__()
+        
+        if architecture == 'resnet18':
+            resnet = models.resnet18(weights=None)
+            self.feature_dim = 512
+        elif architecture == 'resnet50':
+            resnet = models.resnet50(weights=None)
+            self.feature_dim = 2048
         else:
-            raise ValueError(f"Unknown SSL method: {ssl_method}. Only 'simclr' is currently supported.")
+            raise ValueError(f"Unsupported architecture: {architecture}")
         
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        # # Update target network for BYOL (commented out - not using BYOL)
-        # if ssl_method == 'byol':
-        #     model.update_moving_average()
-        
-        losses.update(loss.item(), img1.size(0))
-        
-        # Logging
-        if batch_idx % config['logging']['log_every_n_steps'] == 0:
-            logger.log(
-                f"Epoch [{epoch}][{batch_idx}/{len(dataloader)}] "
-                f"Loss: {losses.val:.4f} ({losses.avg:.4f})"
-            )
-    
-    return losses.avg
+        # Remove final classification layer
+        self.encoder = nn.Sequential(*list(resnet.children())[:-1])
 
+    def forward(self, x):
+        features = self.encoder(x)
+        features = torch.flatten(features, 1)
+        return features
+
+
+class ProjectionHead(nn.Module):
+    """MLP projection head for contrastive learning"""
+    
+    def __init__(self, input_dim=512, hidden_dim=512, output_dim=128):
+        super().__init__()
+        self.projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x):
+        return self.projection(x)
+
+
+class SimCLR(nn.Module):
+    """Complete SimCLR model with encoder and projection head"""
+    
+    def __init__(self, architecture='resnet18'):
+        super().__init__()
+        self.architecture = architecture
+        self.encoder = Encoder(architecture)
+        self.projection_head = ProjectionHead(
+            input_dim=self.encoder.feature_dim,
+            hidden_dim=self.encoder.feature_dim,
+            output_dim=128
+        )
+
+    def forward(self, x):
+        features = self.encoder(x)
+        embeddings = self.projection_head(features)
+        return embeddings
+
+    def get_features(self, x):
+        """Get encoder features without projection (for downstream tasks)"""
+        return self.encoder(x)
+
+
+# ==============================================================================
+# Loss Function
+# ==============================================================================
+
+class NTXentLoss(nn.Module):
+    """Normalized Temperature-Scaled Cross Entropy Loss (NT-XENT)"""
+    
+    def __init__(self, temperature=0.1):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, z_i, z_j):
+        batch_size = z_i.shape[0]
+
+        # Normalize embeddings
+        z_i = nn.functional.normalize(z_i, dim=-1)
+        z_j = nn.functional.normalize(z_j, dim=-1)
+
+        # Concatenate: [2*batch_size, embedding_dim]
+        z = torch.cat([z_i, z_j], dim=0)
+
+        # Compute similarity matrix
+        sim_matrix = torch.matmul(z, z.T) / self.temperature
+
+        # Create labels
+        labels = torch.arange(batch_size, device=z.device)
+        labels = torch.cat([labels + batch_size, labels])
+
+        # Mask out self-similarities
+        mask = torch.eye(2 * batch_size, dtype=torch.bool, device=z.device)
+        sim_matrix = sim_matrix.masked_fill(mask, float('-inf'))
+
+        loss = nn.functional.cross_entropy(sim_matrix, labels)
+        return loss
+
+
+# ==============================================================================
+# Training Function
+# ==============================================================================
+
+def train_SimCLR(model, train_loader, num_epochs=50, lr=0.3, warmup_epochs=10,save_dir='.'):
+    """
+    Train SimCLR model with progress bars
+    
+    Args:
+        model: SimCLR model
+        train_loader: DataLoader for training data
+        num_epochs: Number of training epochs
+        lr: Learning rate
+        warmup_epochs: Number of warmup epochs
+        save_dir: Base directory to save checkpoints
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Create checkpoint directories
+    checkpoints_dir = os.path.join(save_dir, 'checkpoints')
+    best_model_dir = os.path.join(save_dir, 'best_model')
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    os.makedirs(best_model_dir, exist_ok=True)
+    print(f"Checkpoints will be saved to: {checkpoints_dir}")
+    print(f"Best model will be saved to: {best_model_dir}")
+    
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-6)
+
+    # LR scheduler with warmup and cosine decay
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            # Linear warmup
+            return (epoch + 1) / warmup_epochs
+        else:
+            # Cosine decay after warmup
+            progress = (epoch - warmup_epochs) / (num_epochs - warmup_epochs)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    criterion = NTXentLoss(temperature=0.1)
+
+    # Mixed precision scaler for fp16 in most computations & critical operations in fp32 (speeds up training)
+    scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
+    if scaler:
+        print("Mixed precision training: ENABLED")
+    else:
+        print("Mixed precision training: DISABLED (no CUDA)")
+
+    best_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0.0
+
+        # Progress bar for batches
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch+1}/{num_epochs}",
+            leave=True,
+            dynamic_ncols=True,
+            total=len(train_loader)
+        )
+
+        for batch_idx, (view1, view2) in enumerate(pbar):
+            view1 = view1.to(device)
+            view2 = view2.to(device)
+
+            optimizer.zero_grad()
+
+            # NEW: Mixed precision forward pass
+            if scaler is not None:
+                with torch.amp.autocast('cuda'):
+                    z1 = model(view1)
+                    z2 = model(view2)
+                    loss = criterion(z1, z2)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Fallback for CPU
+                z1 = model(view1)
+                z2 = model(view2)
+                loss = criterion(z1, z2)
+                loss.backward()
+                optimizer.step()
+
+            total_loss += loss.item()
+
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'avg_loss': f'{total_loss / (batch_idx + 1):.4f}',
+                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+            })
+
+        scheduler.step()
+        avg_loss = total_loss / len(train_loader)
+        
+        print(f"Epoch [{epoch+1}/{num_epochs}] - Average Loss: {avg_loss:.4f}")
+
+        # Save best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+                'scheduler': scheduler.state_dict(),
+                'architecture': model.architecture
+            }, os.path.join(best_model_dir, 'best_model.pth'))
+            print(f"  -> New best model saved! (loss: {avg_loss:.4f})")
+
+        # Save checkpoint every 10 epochs (or every epoch if num_epochs < 10)
+        if (epoch + 1) % 10 == 0 or num_epochs < 10:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+                'scheduler': scheduler.state_dict(),
+                'architecture': model.architecture
+            }, os.path.join(checkpoints_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+            print(f"  -> Checkpoint saved at epoch {epoch+1}")
+
+    # Save final model
+    torch.save({
+        'epoch': num_epochs - 1,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': avg_loss,
+        'scheduler': scheduler.state_dict(),
+        'architecture': model.architecture
+    }, os.path.join(checkpoints_dir, 'final_model.pth'))
+    print(f"Training complete! Final model saved.")
+    print(f"Best loss achieved: {best_loss:.4f}")
+
+
+# ==============================================================================
+# Main
+# ==============================================================================
 
 def main():
-    """Main training function."""
-    args = parse_args()
+    parser = argparse.ArgumentParser(description='Train SimCLR model')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=1024, help='Batch size')
+    parser.add_argument('--lr', type=float, default=0.3, help='Learning rate')
+    parser.add_argument('--warmup_epochs', type=int, default=10, help='Number of warmup epochs')
+    parser.add_argument('--arch', type=str, default='resnet18', 
+                        choices=['resnet18', 'resnet50'], help='Encoder architecture')
+    parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
+    parser.add_argument('--save_dir', type=str, default='.', help='Directory to save checkpoints')
+    parser.add_argument('--cache_dir', type=str, default='./cached_dataset', help='Path to cached dataset')
+    args = parser.parse_args()
+
+    # Scale LR by batch size, similar to SimCLR paper
+    scaled_lr = args.lr * args.batch_size / 256
+    print(f"Base LR: {args.lr}, Batch size: {args.batch_size}, Scaled LR: {scaled_lr:.6f}")
+
+    # Set HuggingFace cache directory
+    hf_cache_dir = '/gpfs/scratch/rrr9340/hf_cache'
+    os.makedirs(hf_cache_dir, exist_ok=True)
+    print(f"HuggingFace cache directory: {hf_cache_dir}")
+
+    # Load dataset
+    print("Loading dataset...")
+    DATASET_ID = 'tsbpp/fall2025_deeplearning'
+
+    try:
+        print(f"Loading from HF cache: {hf_cache_dir}")
+        dataset = load_dataset(DATASET_ID, cache_dir=hf_cache_dir)
+        print(f"✓ Loaded dataset from cache!")
+    except Exception as e:
+        print(f"Cache miss or error: {e}")
+        print(f"Downloading dataset (will be cached automatically)...")
+        dataset = load_dataset(DATASET_ID, cache_dir=hf_cache_dir)
+        print(f"✓ Dataset loaded and cached!")
+
+    # Define precomputed paths early
+    precomputed_dir = os.path.join(args.save_dir, 'precomputed_augmentations')
+    precomputed_file = os.path.join(precomputed_dir, 'augmented_pairs.pt')
     
-    # Load configuration
-    if not os.path.exists(args.config):
-        print(f"Error: Config file not found: {args.config}")
-        sys.exit(1)
-    
-    config = load_config(args.config)
-    
-    # Override config with command line arguments
-    if args.data_dir:
-        config['data']['data_root'] = args.data_dir
-    if args.epochs:
-        config['training']['epochs'] = args.epochs
-    if args.batch_size:
-        config['training']['batch_size'] = args.batch_size
-    if args.lr:
-        config['training']['learning_rate'] = args.lr
-    if args.output_dir:
-        config['checkpoint']['save_dir'] = args.output_dir
-    if args.resume:
-        config['checkpoint']['resume'] = args.resume
-    if args.wandb:
-        config['logging']['use_wandb'] = True
-        config['logging']['wandb_project'] = args.wandb_project
-        if args.wandb_run_name:
-            config['logging']['wandb_run_name'] = args.wandb_run_name
-    
-    # Setup logging
-    logger = Logger(
-        log_dir=config['logging']['log_dir'],
-        use_wandb=config['logging'].get('use_wandb', False),
-        wandb_project=config['logging'].get('wandb_project', 'fall2025-deep-learning'),
-        wandb_run_name=config['logging'].get('wandb_run_name', config.get('experiment_name', 'unnamed'))
-    )
-    
-    logger.log("=" * 60)
-    logger.log("Self-Supervised Learning Training")
-    logger.log("=" * 60)
-    logger.log(f"Experiment: {config.get('experiment_name', 'unnamed')}")
-    logger.log(f"Model: {config['model']['name']}")
-    logger.log(f"SSL Method: {config['ssl']['method']}")
-    logger.log(f"Dataset: {config['data']['dataset']}")
-    logger.log(f"Device: {args.device}")
-    logger.log("=" * 60)
-    
-    # Update wandb config if using wandb
-    if config['logging'].get('use_wandb', False):
-        logger.update_config(config)
-    
-    # Build model
-    logger.log("Building model...")
-    base_encoder = build_model(config['model'])
-    model = build_ssl_method(config['ssl'], base_encoder)
-    model = model.to(args.device)
-    
-    # Setup optimizer
-    optimizer_name = config['optimizer']['name'].lower()
-    if optimizer_name == 'sgd':
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=config['training']['learning_rate'],
-            momentum=config['optimizer'].get('momentum', 0.9),
-            weight_decay=config['training']['weight_decay']
-        )
-    elif optimizer_name == 'adam':
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
-        )
-    elif optimizer_name == 'adamw':
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
-        )
-    else:
-        raise ValueError(f"Unknown optimizer: {optimizer_name}")
-    
-    # Load checkpoint if resuming
-    start_epoch = 0
-    best_loss = float('inf')
-    if config['checkpoint'].get('resume'):
-        start_epoch, best_loss = load_checkpoint(
-            config['checkpoint']['resume'],
-            model,
-            optimizer,
-            scheduler=None
-        )
-    
-    # Setup data loader
-    logger.log("Loading data...")
-    train_loader = get_dataloader(config, is_train=True)
-    logger.log(f"Training samples: {len(train_loader.dataset)}")
-    
-    # Training loop
-    logger.log("Starting training...")
-    for epoch in range(start_epoch, config['training']['epochs']):
-        # Adjust learning rate
-        lr = adjust_learning_rate(optimizer, epoch, config)
-        logger.log(f"\nEpoch {epoch + 1}/{config['training']['epochs']} - LR: {lr:.6f}")
+    try: 
+        print(f"Number of pretraining images: {len(dataset['train'])}")
+
+        # Check if pre-computed dataset exists
+        if os.path.exists(precomputed_file):
+            print(f"\n✓ Found pre-computed augmentations at {precomputed_file}")
+            print("Loading pre-computed dataset...")
+            precomputed_pairs = torch.load(precomputed_file)
+            print(f"✓ Loaded {len(precomputed_pairs)} pre-computed pairs")
         
-        # Train for one epoch
-        train_loss = train_epoch(
-            model, train_loader, optimizer, args.device, epoch, logger, config
-        )
-        
-        logger.log(f"Epoch {epoch + 1} - Average Loss: {train_loss:.4f}")
-        
-        # Update best loss
-        is_best = train_loss < best_loss
-        if is_best:
-            best_loss = train_loss
-            logger.log(f"New best loss: {best_loss:.4f}")
-        
-        # Save checkpoint (always save latest + best)
-        checkpoint_dir = Path(config['checkpoint']['save_dir']) / config.get('experiment_name', 'default')
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        checkpoint_state = {
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'best_loss': best_loss,
-            'config': config,
-        }
-        
-        # Always save latest checkpoint (for resuming after preemption)
-        latest_path = checkpoint_dir / 'checkpoint_latest.pth'
-        save_checkpoint(checkpoint_state, latest_path, is_best=False)
-        
-        # Save best checkpoint
-        if is_best:
-            best_path = checkpoint_dir / 'checkpoint_best.pth'
-            save_checkpoint(checkpoint_state, best_path, is_best=False)
-        
-        # Save periodic checkpoints
-        if (epoch + 1) % config['logging']['save_every_n_epochs'] == 0:
-            save_checkpoint(
-                checkpoint_state,
-                filename=checkpoint_dir / f'checkpoint_epoch_{epoch + 1}.pth',
-                is_best=False
+        else:
+            # Need to compute augmentations
+            print(f"\n✗ Pre-computed augmentations not found at {precomputed_file}")
+            print("Computing augmentations (first-time setup, takes ~20-40 minutes)...\n")
+            
+            # Load all images into RAM with parallel processing
+            print("Materializing dataset into RAM...")
+            import time
+            start_time = time.time()
+            
+            # Use map with num_proc to parallelize disk I/O
+            dataset['train'] = dataset['train'].map(
+                lambda x: x,  # Identity mapping
+                batched=False,
+                num_proc=8,  # Parallel processes for I/O
+                desc="Loading images to RAM"
             )
-            logger.log(f"Checkpoint saved at epoch {epoch + 1}")
+            
+            # Now actually collect into a list with progress bar
+            images_in_ram = []
+            for sample in tqdm(dataset['train'], desc="Collecting images to RAM", total=len(dataset['train'])):
+                images_in_ram.append(sample['image'])
+            
+            ram_load_time = time.time() - start_time
+            print(f"✓ Materialized {len(images_in_ram)} images to RAM in {ram_load_time/60:.1f} minutes\n")
+            
+            # Pre-compute augmentations
+            print("Pre-computing augmentations for all images...")
+            print("(This takes 10-20 minutes, but subsequent runs will be instant!)\n")
+            
+            augmentation = SimCLRAugmentation(image_size=96)
+            
+            precomputed_pairs = []
+            for img in tqdm(images_in_ram, desc="Augmenting images"):
+                if not isinstance(img, Image.Image):
+                    img = Image.fromarray(img)
+                img = img.convert('RGB')
+                view1, view2 = augmentation(img)
+                precomputed_pairs.append((view1, view2))
+            
+            print(f"✓ Pre-computed {len(precomputed_pairs)} augmented pairs\n")
+            
+            # Save to disk BEFORE training starts
+            print(f"Saving pre-computed dataset to {precomputed_file}...")
+            os.makedirs(precomputed_dir, exist_ok=True)
+            torch.save(precomputed_pairs, precomputed_file)
+            precomputed_size = os.path.getsize(precomputed_file) / 1e9
+            print(f"✓ Saved! File size: {precomputed_size:.1f} GB\n")
+            print("="*60)
+            print("PRECOMPUTED DATASET IS SAFE!")
+            print(f"Location: {precomputed_file}")
+            print("="*60 + "\n")
     
-    logger.log("\n" + "=" * 60)
-    logger.log("Training completed!")
-    logger.log("=" * 60)
-    
-    # Finish wandb run
-    logger.finish()
+        # Pre-computed dataset class
+        class PrecomputedDataset(Dataset):
+            def __init__(self, pairs):
+                self.pairs = pairs
+            
+            def __len__(self):
+                return len(self.pairs)
+            
+            def __getitem__(self, idx):
+                return self.pairs[idx]
+        
+        # Create dataset and dataloader
+        train_dataset = PrecomputedDataset(precomputed_pairs)
+
+        print("Creating DataLoader...")
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=False
+        )
+        print(f"Train DataLoader created. Total batches per epoch: {len(train_loader)}\n")
+
+        # Create and train model
+        print(f"Initializing SimCLR model with {args.arch}...")
+        model = SimCLR(architecture=args.arch)
+        
+        num_params = sum(p.numel() for p in model.parameters())
+        print(f"Total parameters: {num_params:,}\n")
+
+        print(f"Starting training for {args.epochs} epochs...")
+        train_SimCLR(
+            model, 
+            train_loader, 
+            num_epochs=args.epochs, 
+            lr=scaled_lr,
+            warmup_epochs=args.warmup_epochs,
+            save_dir=args.save_dir
+        )
+
+        print("\n" + "="*60)
+        print("✓ TRAINING COMPLETED SUCCESSFULLY!")
+        print("="*60)
+        
+    except KeyboardInterrupt:
+        print("\n⚠️  Training interrupted by user")
+        print(f"Precomputed dataset saved at: {precomputed_dir}")
+        raise
+    except Exception as e:
+        print(f"\n❌ Error during training: {e}")
+        print(f"Precomputed dataset saved at: {precomputed_dir}")
+        raise
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

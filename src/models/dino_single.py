@@ -191,7 +191,7 @@ class ImageFolderDataset(Dataset):
         return img
 
 # =============================================================================
-# 3. MODEL ARCHITECTURE (Fixed for Multi-Crop & timm dynamic size)
+# 3. MODEL ARCHITECTURE (Explicit Shape Handling)
 # =============================================================================
 
 class DINOHead(nn.Module):
@@ -230,10 +230,9 @@ class DINOHead(nn.Module):
 
 def interpolate_pos_encoding(x, pos_embed):
     """
-    Interpolate pos_encoding from the existing pos_embed to the resolution of x.
-    This is critical for handling 32x32 local crops when model is trained on 96x96.
+    x shape: (Batch, N_patches, Dim)
+    pos_embed shape: (1, N_original, Dim)
     """
-    # x shape here is (Batch, N_tokens, Dim) containing CLS token
     npatch = x.shape[1] - 1 
     N = pos_embed.shape[1] - 1
     
@@ -245,17 +244,17 @@ def interpolate_pos_encoding(x, pos_embed):
     
     dim = x.shape[-1]
     
-    # Calculate original grid size (e.g., 12x12 for 96px image with patch 8)
+    # Original Grid (e.g. 12x12)
     w0 = w1 = int(math.sqrt(N)) 
     
-    # Calculate new grid size (e.g., 4x4 for 32px image with patch 8)
+    # New Grid (e.g. 4x4)
     w_new = int(math.sqrt(npatch))
     h_new = w_new
     
-    # Reshape to (1, Dim, Grid, Grid) for F.interpolate
+    # Reshape and Interpolate
+    # (1, N, C) -> (1, Grid, Grid, C) -> (1, C, Grid, Grid)
     patch_pos_embed = patch_pos_embed.reshape(1, w0, w1, dim).permute(0, 3, 1, 2)
     
-    # Interpolate
     patch_pos_embed = F.interpolate(
         patch_pos_embed, 
         size=(w_new, h_new), 
@@ -263,39 +262,47 @@ def interpolate_pos_encoding(x, pos_embed):
         align_corners=False
     )
     
-    # Flatten back to (1, N_new, Dim)
+    # Flatten back: (1, C, Grid, Grid) -> (1, Grid, Grid, C) -> (1, N, C)
     patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
     
     return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
 class CustomViT(VisionTransformer):
-    """
-    Subclass of timm VisionTransformer that handles Multi-Crop positional interpolation.
-    """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
     def forward_features(self, x):
-        # 1. Embed patches
+        # 1. Embed Patches
         x = self.patch_embed(x)
         
-        # --- FIX START ---
-        # When dynamic_img_size=True, timm returns (B, C, H, W).
-        # We need (B, N, C).
-        if x.dim() == 4:
-            x = x.flatten(2).transpose(1, 2)
-        # --- FIX END ---
+        # 2. FORCE CORRECT SHAPE (The "Hammer" Fix)
+        # We know x must be (Batch, N_patches, Embed_Dim) for the transformer blocks.
+        # If timm returns (Batch, Embed_Dim, H, W), we mechanically force it.
+        
+        if x.shape[1] == self.embed_dim and x.dim() == 4:
+            # Case: (B, 384, 12, 12)
+            # Flatten H,W -> (B, 384, 144)
+            x = x.flatten(2) 
+            # Transpose to (B, 144, 384)
+            x = x.transpose(1, 2)
+        elif x.dim() == 3 and x.shape[2] == self.embed_dim:
+            # Case: Already (B, N, 384) - Do nothing
+            pass
+        else:
+            # Debugging catch-all
+            raise RuntimeError(f"Unexpected tensor shape from patch_embed: {x.shape}. Expected (B, {self.embed_dim}, H, W) or (B, N, {self.embed_dim})")
 
-        # 2. Add CLS token
+        # 3. Add CLS Token
+        # Concatenation happens on Dimension 1 (Sequence Length)
+        # cls_token: (B, 1, 384)
+        # x:         (B, 144, 384)
         cls_token = self.cls_token.expand(x.shape[0], -1, -1) 
         x = torch.cat((cls_token, x), dim=1)
         
-        # 3. Add Positional Embedding (INTERPOLATED)
+        # 4. Add Positional Embedding
         x = x + interpolate_pos_encoding(x, self.pos_embed)
         
         x = self.pos_drop(x)
-        
-        # 4. Run blocks
         x = self.blocks(x)
         x = self.norm(x)
         return x
@@ -323,7 +330,7 @@ def get_model(cfg):
         qkv_bias=True,
         norm_layer=nn.LayerNorm,
         num_classes=0,
-        dynamic_img_size=True  # Keeps assert from failing on 32px images
+        dynamic_img_size=True 
     )
     
     for p in backbone.parameters():

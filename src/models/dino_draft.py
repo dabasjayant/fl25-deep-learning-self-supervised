@@ -27,7 +27,7 @@ class DINOConfig:
     batch_size_per_gpu: int = 32
     num_workers: int = 4
     base_lr: float = 1.5e-4
-    warmup_epochs: int = 10
+    warmup_epochs: int = 5
     weight_decay: float = 0.04
     weight_decay_end: float = 0.4
     clip_grad_norm: float = 3.0

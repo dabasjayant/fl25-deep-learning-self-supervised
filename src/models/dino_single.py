@@ -28,6 +28,7 @@ def get_args():
     # Critical System Params
     parser.add_argument("--data_path", type=str, required=True, help="Path to folder containing images")
     parser.add_argument("--output_dir", type=str, default="./checkpoints_ssl", help="Where to save weights")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from (e.g., './checkpoints_ssl/checkpoint_epoch_010.pth')")
     parser.add_argument("--workers", type=int, default=12, help="Number of data loading workers (default: 12 for 14-core CPU)")
     parser.add_argument("--batch_size", type=int, default=512, help="Batch size (reduce to 512 if OOM)")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
@@ -383,6 +384,38 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     schedule = torch.cat((warmup_schedule, schedule))
     return schedule
 
+def load_state_dict_robust(model, state_dict):
+    """
+    Robustly loads a state_dict into a model, handling 'module.' prefix mismatches
+    caused by compiling (torch.compile), DDP, or Accelerator wrapping.
+    """
+    model_dict = model.state_dict()
+    new_state_dict = {}
+    
+    # specific fix for DINO head which might have different keys if not careful
+    for k, v in state_dict.items():
+        # 1. Handle 'module.' prefix (common in DDP/Accelerate)
+        if k.startswith("module.") and not "module." in list(model_dict.keys())[0]:
+            name = k[7:] # remove 'module.'
+        elif not k.startswith("module.") and "module." in list(model_dict.keys())[0]:
+            name = "module." + k # add 'module.'
+        else:
+            name = k
+            
+        if name in model_dict:
+            # Check shape mismatch (e.g. if you changed image size or patch size)
+            if v.shape == model_dict[name].shape:
+                new_state_dict[name] = v
+            else:
+                print(f"[WARNING] Skipping {name}: shape mismatch {v.shape} vs {model_dict[name].shape}")
+        else:
+            # print(f"[WARNING] Key {name} not found in model.")
+            pass
+            
+    # Load the processed dict
+    msg = model.load_state_dict(new_state_dict, strict=False)
+    return msg
+
 # =============================================================================
 # 6. MAIN TRAINING LOOP
 # =============================================================================
@@ -545,6 +578,34 @@ def main():
         warmup_teacher_temp_epochs=0, # Typically 0 or small for DINO
         nepochs=cfg.epochs
     ).to(accelerator.device)
+
+    # --- RESUME LOGIC ---
+    start_epoch = 0
+    if args.resume:
+        if os.path.isfile(args.resume):
+            logger.info(f"==> Resuming from checkpoint: {args.resume}")
+            # Map location is crucial to avoid OOM by loading everything to CPU first
+            checkpoint = torch.load(args.resume, map_location='cpu')
+            
+            # 1. Load Epoch
+            start_epoch = checkpoint['epoch'] + 1
+            
+            # 2. Load Models (Robustly)
+            # Student is wrapped by Accelerate, Teacher is not.
+            load_state_dict_robust(student, checkpoint['student'])
+            load_state_dict_robust(teacher, checkpoint['teacher'])
+            
+            # 3. Load Optimizer
+            # Accelerate handles optimizer mapping, but we must load the state dict
+            # Standard PyTorch load works fine here because we are post-prepare
+            try:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+            except ValueError as e:
+                logger.warning(f"Optimizer load failed (likely device mismatch or param change). Skipping optimizer resume. Error: {e}")
+            
+            logger.info(f"==> Resumed successfully! Starting from Epoch {start_epoch}")
+        else:
+            logger.warning(f"==> Resume file not found at {args.resume}. Starting from scratch.")
     
     # Schedulers
     n_iter = len(data_loader)
@@ -557,7 +618,7 @@ def main():
     
     logger.info("Starting training loop...")
     
-    for epoch in range(cfg.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         avg_loss = train_one_epoch(
             student=student,
             teacher=teacher,

@@ -178,9 +178,9 @@ def build_dataloader(cfg: DINOConfig) -> DataLoader:
         batch_size=cfg.batch_size_per_gpu,
         shuffle=True,
         num_workers=cfg.num_workers,
-        pin_memory=False,
+        pin_memory=True,
         drop_last=True,
-        persistent_workers=False,
+        persistent_workers=True,
     )
     return dl
 

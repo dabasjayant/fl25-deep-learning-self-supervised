@@ -275,31 +275,35 @@ class CustomViT(VisionTransformer):
         # 1. Embed Patches
         x = self.patch_embed(x)
         
-        # 2. FORCE CORRECT SHAPE (The "Hammer" Fix)
-        # We know x must be (Batch, N_patches, Embed_Dim) for the transformer blocks.
-        # If timm returns (Batch, Embed_Dim, H, W), we mechanically force it.
+        # 2. FORCE CORRECT SHAPE
+        # The goal is always (Batch, N_patches, Embed_Dim)
         
-        if x.shape[1] == self.embed_dim and x.dim() == 4:
-            # Case: (B, 384, 12, 12)
-            # Flatten H,W -> (B, 384, 144)
-            x = x.flatten(2) 
-            # Transpose to (B, 144, 384)
-            x = x.transpose(1, 2)
+        # Case A: (Batch, Embed_Dim, H, W) -> Standard PyTorch / Timm
+        # e.g., (512, 384, 12, 12)
+        if x.dim() == 4 and x.shape[1] == self.embed_dim:
+            x = x.flatten(2)       # -> (512, 384, 144)
+            x = x.transpose(1, 2)  # -> (512, 144, 384)
+            
+        # Case B: (Batch, H, W, Embed_Dim) -> YOUR ERROR CASE (Channels Last)
+        # e.g., (512, 12, 12, 384)
+        elif x.dim() == 4 and x.shape[-1] == self.embed_dim:
+            x = x.flatten(1, 2)    # Flatten H and W -> (512, 144, 384)
+
+        # Case C: (Batch, N, Embed_Dim) -> Already Correct
+        # e.g., (512, 144, 384)
         elif x.dim() == 3 and x.shape[2] == self.embed_dim:
-            # Case: Already (B, N, 384) - Do nothing
             pass
+            
         else:
-            # Debugging catch-all
-            raise RuntimeError(f"Unexpected tensor shape from patch_embed: {x.shape}. Expected (B, {self.embed_dim}, H, W) or (B, N, {self.embed_dim})")
+            # If we get here, the shape is truly bizarre
+            raise RuntimeError(f"Unknown tensor shape: {x.shape}. Expected dims to include {self.embed_dim}.")
 
         # 3. Add CLS Token
-        # Concatenation happens on Dimension 1 (Sequence Length)
-        # cls_token: (B, 1, 384)
-        # x:         (B, 144, 384)
+        # Now x is guaranteed to be (Batch, N, 384)
         cls_token = self.cls_token.expand(x.shape[0], -1, -1) 
         x = torch.cat((cls_token, x), dim=1)
         
-        # 4. Add Positional Embedding
+        # 4. Add Positional Embedding (Interpolated)
         x = x + interpolate_pos_encoding(x, self.pos_embed)
         
         x = self.pos_drop(x)

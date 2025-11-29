@@ -369,26 +369,38 @@ class DINOLoss(nn.Module):
     def forward(self, student_output, teacher_output, epoch):
         """
         student_output: [n_crops * batch_size, dim]
-        teacher_output: [2 * batch_size, dim]  (Teacher only processes global crops)
+        teacher_output: [2 * batch_size, dim]
         """
         student_out = student_output / self.student_temp
-        student_out = student_out.chunk(student_output.shape[0] // teacher_output.shape[0])
+        
+        # --- FIX START ---
+        # 1. Determine exact batch size from Teacher (always 2 global crops)
+        batch_size = teacher_output.shape[0] // 2
+        
+        # 2. Calculate total number of crops passed to student
+        n_crops = student_output.shape[0] // batch_size
+        
+        # 3. Chunk student output into exactly 'n_crops' parts
+        # Each part will now have shape [Batch_Size, Dim] -> [256, Dim]
+        student_out = student_out.chunk(n_crops)
+        # --- FIX END ---
 
         # Teacher centering and sharpening
         temp = self.teacher_temp_schedule[epoch]
         teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(2) # 2 global crops
+        teacher_out = teacher_out.detach().chunk(2) # 2 chunks of size [256, Dim]
 
         total_loss = 0
         n_loss_terms = 0
         
-        # Cross-entropy between every student view and every teacher view
         for iq, q in enumerate(teacher_out):
             for v in range(len(student_out)):
                 if v == iq: 
-                    # Skip calculating loss where student and teacher view are the same original image crop
-                    # (Standard DINO skips this, though some implementations keep it)
+                    # Skip same view (Global 1 vs Global 1)
                     continue
+                
+                # q shape: [256, Dim]
+                # student_out[v] shape: [256, Dim] --> MATCH!
                 loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
                 total_loss += loss.mean()
                 n_loss_terms += 1
@@ -400,7 +412,7 @@ class DINOLoss(nn.Module):
     @torch.no_grad()
     def update_center(self, teacher_output):
         batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        # Distributed averaging would go here if using DDP across multiple nodes
+        # Distributed averaging would go here if using DDP
         batch_center = batch_center / len(teacher_output)
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 

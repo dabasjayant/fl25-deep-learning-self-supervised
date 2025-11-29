@@ -192,7 +192,7 @@ class ImageFolderDataset(Dataset):
         return img
 
 # =============================================================================
-# 3. MODEL ARCHITECTURE (ViT-Small/8 + DINO Head)
+# 3. MODEL ARCHITECTURE (Fixed for Multi-Crop)
 # =============================================================================
 
 class DINOHead(nn.Module):
@@ -229,41 +229,88 @@ class DINOHead(nn.Module):
         x = self.last_layer(x)
         return x
 
+def interpolate_pos_encoding(x, pos_embed):
+    """
+    Interpolate pos_encoding from the existing pos_embed to the resolution of x.
+    This is critical for handling 32x32 local crops when model is trained on 96x96.
+    """
+    npatch = x.shape[1] - 1
+    N = pos_embed.shape[1] - 1
+    
+    if npatch == N:
+        return pos_embed
+        
+    class_pos_embed = pos_embed[:, 0]
+    patch_pos_embed = pos_embed[:, 1:]
+    
+    dim = x.shape[-1]
+    w0 = w1 = int(math.sqrt(N)) # e.g. 12 (for 96px with patch 8)
+    
+    # Recover the grid
+    # We add a small number to avoid floating point error during sqrt
+    w0, h0 = w0, w0 
+    
+    # New grid size
+    w_new = int(math.sqrt(npatch)) # e.g. 4 (for 32px with patch 8)
+    h_new = w_new
+    
+    # Interpolate
+    # We reshape to (1, Grid, Grid, Dim) -> Permute to (1, Dim, Grid, Grid) for F.interpolate
+    patch_pos_embed = patch_pos_embed.reshape(1, w0, h0, dim).permute(0, 3, 1, 2)
+    
+    patch_pos_embed = F.interpolate(
+        patch_pos_embed, 
+        size=(w_new, h_new), 
+        mode='bicubic', 
+        align_corners=False
+    )
+    
+    # Flatten back to (1, N_new, Dim)
+    patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+    
+    return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+
+class CustomViT(VisionTransformer):
+    """
+    Subclass of timm VisionTransformer that handles Multi-Crop positional interpolation.
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+    def forward_features(self, x):
+        # 1. Embed patches
+        x = self.patch_embed(x)
+        
+        # 2. Add CLS token
+        cls_token = self.cls_token.expand(x.shape[0], -1, -1) 
+        x = torch.cat((cls_token, x), dim=1)
+        
+        # 3. Add Positional Embedding (INTERPOLATED)
+        # This is the line that fixes the crash for 32x32 images
+        x = x + interpolate_pos_encoding(x, self.pos_embed)
+        
+        x = self.pos_drop(x)
+        
+        # 4. Run blocks
+        x = self.blocks(x)
+        x = self.norm(x)
+        return x
+
 class MultiCropWrapper(nn.Module):
-    """
-    Convenience wrapper to run forward pass on multiple crops.
-    """
     def __init__(self, backbone, head):
         super(MultiCropWrapper, self).__init__()
         self.backbone = backbone
         self.head = head
 
     def forward(self, x):
-        # x is a list of tensors if coming from collate_fn, or a concatenated tensor
-        # If input is list of crops, we convert to single tensor logic inside train loop usually
-        # Here we assume x is a tensor.
-        
-        # ViT-Small/8 Output
-        # output of backbone is usually (batch, sequence, dim) or (batch, dim)
-        # We need the CLS token.
-        
-        # Timm ViT returns class token by default with num_classes=0 if we select global_pool=''
-        # However, let's use the explicit forward_features
         features = self.backbone.forward_features(x)
-        
-        # If using global average pooling or CLS token.
-        # ViT usually uses CLS token (index 0) or we can average.
-        # Timm's forward_features returns (B, N, D).
         if isinstance(features, tuple): features = features[0]
-        
-        # Take CLS token (index 0)
         cls_token = features[:, 0]
         return self.head(cls_token)
 
 def get_model(cfg):
-    # ViT-Small with Patch Size 8 (Custom for 96x96 images)
-    # We use timm to create the structure, but ensure random init.
-    backbone = VisionTransformer(
+    # Use our CustomViT instead of standard VisionTransformer
+    backbone = CustomViT(
         img_size=cfg.image_size,
         patch_size=cfg.patch_size,
         embed_dim=cfg.embed_dim,
@@ -272,10 +319,10 @@ def get_model(cfg):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=nn.LayerNorm,
-        num_classes=0  # No classifier
+        num_classes=0,
+        dynamic_img_size=True  # <--- CRITICAL: Tells timm to allow different sizes
     )
     
-    # Force Random Initialization (Just to be safe/explicit per requirements)
     for p in backbone.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)

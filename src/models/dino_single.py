@@ -497,10 +497,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, loss_fn, data_loader,
                    lr_schedule, wd_schedule, momentum_schedule, epoch, accelerator, args):
     
     student.train()
-    # Teacher is always in eval mode
     teacher.eval()
     
     metric_logger = {'loss': 0.0}
+    
+    # Use accelerator to handle the progress bar correctly
     pbar = tqdm(data_loader, desc=f"Epoch {epoch}/{args.epochs}", disable=not accelerator.is_local_main_process)
     
     for it, images in enumerate(pbar):
@@ -508,51 +509,31 @@ def train_one_epoch(student, teacher, teacher_without_ddp, loss_fn, data_loader,
         cur_iter = epoch * len(data_loader) + it
         for i, param_group in enumerate(optimizer.param_groups):
             param_group["lr"] = lr_schedule[cur_iter]
-            if i == 0:  # only the first group is regularized usually
+            if i == 0:  
                 param_group["weight_decay"] = wd_schedule[cur_iter]
 
-        # Move images to device
-        # Images is a list of crops. Structure: [Global1, Global2, Local1, ..., LocalN]
-        # We concatenate them differently for Student and Teacher
-        # Teacher sees only global views (first 2)
-        # Student sees ALL views
+        # Images are on the correct device automatically via Accelerate's dataloader
         
-        # list of tensors -> single tensor for efficiency? 
-        # No, because resolutions differ. 
-        # Global crops are 96x96, Local are 32x32. We must batch separately.
-        
+        # Split crops
         global_crops = images[:2]
         local_crops = images[2:]
         
-        # Multi-resolution forward pass strategy:
-        # 1. Pass global crops through Teacher
-        # 2. Pass global AND local crops through Student
-        
+        # --- FORWARD PASS ---
         with torch.no_grad():
-            # Teacher Forward
-            # Stack the 2 global crops: [2*B, 3, 96, 96]
             teacher_input = torch.cat(global_crops, dim=0)
             teacher_output = teacher(teacher_input)
 
-        # Student Forward
-        # We cannot stack all crops simply because dimensions differ.
-        # We forward global crops first, then local crops.
         student_input_global = torch.cat(global_crops, dim=0)
         student_input_local = torch.cat(local_crops, dim=0)
         
-        # Use Accelerate's autocast context implicitly via backward()
-        # But we need to handle forward. Accelerate handles device placement, 
-        # but typically we just run model(input).
-        
-        # Student Output: [ (2 + n_local) * B, dim ]
         student_output_global = student(student_input_global)
         student_output_local = student(student_input_local)
         student_output = torch.cat([student_output_global, student_output_local], dim=0)
 
-        # Calculate Loss
+        # --- LOSS ---
         loss = loss_fn(student_output, teacher_output, epoch)
 
-        # Optimization
+        # --- BACKWARD ---
         optimizer.zero_grad()
         accelerator.backward(loss)
         
@@ -561,13 +542,17 @@ def train_one_epoch(student, teacher, teacher_without_ddp, loss_fn, data_loader,
             
         optimizer.step()
 
-        # EMA Update of Teacher
+        # --- EMA UPDATE (THE FIX) ---
         with torch.no_grad():
-            m = momentum_schedule[cur_iter]  # momentum parameter
-            for param_q, param_k in zip(student.module.parameters(), teacher_without_ddp.parameters()):
+            m = momentum_schedule[cur_iter]
+            
+            # FIX: Handle Single-GPU (no .module) vs Multi-GPU (has .module)
+            student_params = student.module.parameters() if hasattr(student, "module") else student.parameters()
+            
+            for param_q, param_k in zip(student_params, teacher_without_ddp.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
-        # Logging
+        # --- LOGGING ---
         loss_val = loss.item()
         metric_logger['loss'] += loss_val
         pbar.set_postfix({'loss': f"{loss_val:.4f}", 'lr': f"{lr_schedule[cur_iter]:.6f}"})

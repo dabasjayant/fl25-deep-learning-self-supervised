@@ -1,4 +1,3 @@
-import argparse
 import os
 import glob
 import math
@@ -192,7 +191,7 @@ class ImageFolderDataset(Dataset):
         return img
 
 # =============================================================================
-# 3. MODEL ARCHITECTURE (Fixed for Multi-Crop)
+# 3. MODEL ARCHITECTURE (Fixed for Multi-Crop & timm dynamic size)
 # =============================================================================
 
 class DINOHead(nn.Module):
@@ -234,7 +233,8 @@ def interpolate_pos_encoding(x, pos_embed):
     Interpolate pos_encoding from the existing pos_embed to the resolution of x.
     This is critical for handling 32x32 local crops when model is trained on 96x96.
     """
-    npatch = x.shape[1] - 1
+    # x shape here is (Batch, N_tokens, Dim) containing CLS token
+    npatch = x.shape[1] - 1 
     N = pos_embed.shape[1] - 1
     
     if npatch == N:
@@ -244,20 +244,18 @@ def interpolate_pos_encoding(x, pos_embed):
     patch_pos_embed = pos_embed[:, 1:]
     
     dim = x.shape[-1]
-    w0 = w1 = int(math.sqrt(N)) # e.g. 12 (for 96px with patch 8)
     
-    # Recover the grid
-    # We add a small number to avoid floating point error during sqrt
-    w0, h0 = w0, w0 
+    # Calculate original grid size (e.g., 12x12 for 96px image with patch 8)
+    w0 = w1 = int(math.sqrt(N)) 
     
-    # New grid size
-    w_new = int(math.sqrt(npatch)) # e.g. 4 (for 32px with patch 8)
+    # Calculate new grid size (e.g., 4x4 for 32px image with patch 8)
+    w_new = int(math.sqrt(npatch))
     h_new = w_new
     
-    # Interpolate
-    # We reshape to (1, Grid, Grid, Dim) -> Permute to (1, Dim, Grid, Grid) for F.interpolate
-    patch_pos_embed = patch_pos_embed.reshape(1, w0, h0, dim).permute(0, 3, 1, 2)
+    # Reshape to (1, Dim, Grid, Grid) for F.interpolate
+    patch_pos_embed = patch_pos_embed.reshape(1, w0, w1, dim).permute(0, 3, 1, 2)
     
+    # Interpolate
     patch_pos_embed = F.interpolate(
         patch_pos_embed, 
         size=(w_new, h_new), 
@@ -281,12 +279,18 @@ class CustomViT(VisionTransformer):
         # 1. Embed patches
         x = self.patch_embed(x)
         
+        # --- FIX START ---
+        # When dynamic_img_size=True, timm returns (B, C, H, W).
+        # We need (B, N, C).
+        if x.dim() == 4:
+            x = x.flatten(2).transpose(1, 2)
+        # --- FIX END ---
+
         # 2. Add CLS token
         cls_token = self.cls_token.expand(x.shape[0], -1, -1) 
         x = torch.cat((cls_token, x), dim=1)
         
         # 3. Add Positional Embedding (INTERPOLATED)
-        # This is the line that fixes the crash for 32x32 images
         x = x + interpolate_pos_encoding(x, self.pos_embed)
         
         x = self.pos_drop(x)
@@ -309,7 +313,6 @@ class MultiCropWrapper(nn.Module):
         return self.head(cls_token)
 
 def get_model(cfg):
-    # Use our CustomViT instead of standard VisionTransformer
     backbone = CustomViT(
         img_size=cfg.image_size,
         patch_size=cfg.patch_size,
@@ -320,7 +323,7 @@ def get_model(cfg):
         qkv_bias=True,
         norm_layer=nn.LayerNorm,
         num_classes=0,
-        dynamic_img_size=True  # <--- CRITICAL: Tells timm to allow different sizes
+        dynamic_img_size=True  # Keeps assert from failing on 32px images
     )
     
     for p in backbone.parameters():

@@ -38,6 +38,11 @@ def get_args():
     parser.add_argument("--image_size", type=int, default=96, help="Input image size")
     parser.add_argument("--patch_size", type=int, default=8, help="ViT Patch size (8 for small images, 16 for large)")
     parser.add_argument("--save_freq", type=int, default=1, help="Save checkpoint every N epochs")
+
+    # Teacher temperature schedule
+    parser.add_argument("--teacher_temp", type=float, default=0.05, help="Teacher temperature (final value)")
+    parser.add_argument("--warmup_teacher_temp", type=float, default=0.05, help="Initial teacher temperature for warmup")
+    parser.add_argument("--warmup_teacher_temp_epochs", type=int, default=0, help="Number of epochs for teacher temperature warmup")
     
     return parser.parse_args()
 
@@ -645,9 +650,9 @@ def main():
     # Loss
     dino_loss = DINOLoss(
         cfg.out_dim, 
-        warmup_teacher_temp=0.05, 
-        teacher_temp=0.05, 
-        warmup_teacher_temp_epochs=0, # Typically 0 or small for DINO
+        warmup_teacher_temp=args.warmup_teacher_temp,
+        teacher_temp=args.teacher_temp,
+        warmup_teacher_temp_epochs=args.warmup_teacher_temp_epochs,
         nepochs=cfg.epochs
     ).to(accelerator.device)
 

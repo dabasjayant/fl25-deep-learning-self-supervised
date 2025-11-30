@@ -91,20 +91,20 @@ class SSLConfig:
     momentum_teacher: float = 0.996 
     
     # --- Extreme Multi-Crop (The Accuracy Booster) ---
-    # seeing 2 global + 10 local = 12 views per image per step.
-    # 1024 batch * 12 views = 12,288 effective examples per step.
-    local_crops_number: int = 10
+    # seeing 2 global + 8 local = 10 views per image per step.
+    # 1024 batch * 10 views = 10,240 effective examples per step.
+    local_crops_number: int = 8
     
     # Crops for 96px:
     # Global: 40% to 100% of image
-    # Local:  15% to 40% of image (small object parts)
+    # Local:  20% to 40% of image (small object parts)
     global_crops_scale: tuple = (0.4, 1.0)
-    local_crops_scale: tuple = (0.25, 0.4)
-    local_crops_size: int = 32
+    local_crops_scale: tuple = (0.2, 0.4)
+    local_crops_size: int = 48
     
     # --- Checkpointing ---
     output_dir: str = "./checkpoints_ssl"
-    keep_last_k: int = 5
+    keep_last_k: int = 10
     save_freq: int = 1
 
 def get_logger(name):
@@ -125,6 +125,7 @@ logger = get_logger(__name__)
 
 class DataAugmentationDINO:
     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, local_crops_size):
+        # 1. Standard Color Jitter
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
@@ -134,32 +135,35 @@ class DataAugmentationDINO:
             transforms.RandomGrayscale(p=0.2),
         ])
         
-        # Global transformation 1
+        # 2. Normalize (Standard ImageNet)
+        normalize = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+
+        # ================= GLOBAL CROPS (TEACHER) =================
         self.global_transfo1 = transforms.Compose([
             transforms.RandomResizedCrop(96, scale=global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
-            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)), # Reduced kernel for 96px
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)), # Reduced kernel
+            normalize,
         ])
         
-        # Global transformation 2 (Solarization added)
         self.global_transfo2 = transforms.Compose([
             transforms.RandomResizedCrop(96, scale=global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
-            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
+            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)), # Reduced kernel
             transforms.RandomSolarize(threshold=128, p=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            normalize,
         ])
         
-        # Local transformation
+        # ================= LOCAL CROPS (STUDENT) =================
         self.local_transfo = transforms.Compose([
             transforms.RandomResizedCrop(local_crops_size, scale=local_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
-            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)), # Smaller blur for small crops
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+            transforms.RandomSolarize(threshold=128, p=0.1), # Gentle solarization
+            normalize,
         ])
 
         self.local_crops_number = local_crops_number
@@ -641,8 +645,8 @@ def main():
     # Loss
     dino_loss = DINOLoss(
         cfg.out_dim, 
-        warmup_teacher_temp=0.04, 
-        teacher_temp=0.04, 
+        warmup_teacher_temp=0.05, 
+        teacher_temp=0.05, 
         warmup_teacher_temp_epochs=0, # Typically 0 or small for DINO
         nepochs=cfg.epochs
     ).to(accelerator.device)

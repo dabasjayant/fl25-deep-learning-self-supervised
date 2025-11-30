@@ -645,9 +645,9 @@ def main():
     # Loss
     dino_loss = DINOLoss(
         cfg.out_dim, 
-        warmup_teacher_temp=0.05, 
-        teacher_temp=0.05, 
-        warmup_teacher_temp_epochs=0, # Typically 0 or small for DINO
+        warmup_teacher_temp=0.04, 
+        teacher_temp=0.06, 
+        warmup_teacher_temp_epochs=10, # Typically 0 or small for DINO
         nepochs=cfg.epochs
     ).to(accelerator.device)
 

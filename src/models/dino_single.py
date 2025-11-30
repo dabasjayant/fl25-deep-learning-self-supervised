@@ -427,6 +427,8 @@ class CheckpointManager:
         os.makedirs(directory, exist_ok=True)
         self.checkpoints = deque() # Stores (epoch, path)
 
+        self.best_metric = None
+
     def save(self, model, teacher, optimizer, epoch, metrics):
         filename = f"checkpoint_epoch_{epoch:03d}.pth"
         path = os.path.join(self.directory, filename)
@@ -441,6 +443,14 @@ class CheckpointManager:
             'metrics': metrics
         }
         torch.save(save_dict, path)
+
+        if metrics and ('loss' in metrics):
+            current_loss = metrics['loss']
+            if (self.best_metric is None) or (current_loss < self.best_metric):
+                self.best_metric = current_loss
+                best_path = os.path.join(self.directory, "best_checkpoint.pth")
+                torch.save(save_dict, best_path)
+                logger.info(f"New best checkpoint saved at epoch {epoch} with loss {current_loss:.4f}")
         
         self.checkpoints.append(path)
         if len(self.checkpoints) > self.keep_last_k:

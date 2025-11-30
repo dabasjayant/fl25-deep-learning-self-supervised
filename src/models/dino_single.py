@@ -99,7 +99,7 @@ class SSLConfig:
     # Global: 40% to 100% of image
     # Local:  15% to 40% of image (small object parts)
     global_crops_scale: tuple = (0.4, 1.0)
-    local_crops_scale: tuple = (0.15, 0.4)
+    local_crops_scale: tuple = (0.25, 0.4)
     local_crops_size: int = 32
     
     # --- Checkpointing ---

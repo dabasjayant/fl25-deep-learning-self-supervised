@@ -93,7 +93,7 @@ class SSLConfig:
     # --- Teacher Momentum (Stability) ---
     # Start higher (0.996) because small batches/images are noisier.
     # We want the teacher to be a "stable anchor".
-    momentum_teacher: float = 0.996 
+    momentum_teacher: float = 0.992 
     
     # --- Extreme Multi-Crop (The Accuracy Booster) ---
     # seeing 2 global + 8 local = 10 views per image per step.

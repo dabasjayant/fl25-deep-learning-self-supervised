@@ -389,8 +389,9 @@ class DINOLoss(nn.Module):
         
         # 3. Handle self-distance (diagonal is 0, we want to ignore it)
         # Add a large value to diagonal so min() doesn't pick it
+        pdist = pdist.clone()
         pdist.fill_diagonal_(float('inf'))
-        
+
         # 4. Find distance to nearest neighbor for each point
         d_min, _ = pdist.min(dim=1)
         
@@ -434,6 +435,14 @@ class DINOLoss(nn.Module):
         
         self.update_center(teacher_output)
         return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """Update the center buffer with exponential moving average."""
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        # Distributed averaging would go here if using DDP
+        batch_center = batch_center / len(teacher_output)
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 # =============================================================================
 # 5. TRAINING UTILS

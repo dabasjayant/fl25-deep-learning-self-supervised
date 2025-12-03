@@ -12,6 +12,7 @@ from collections import deque
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import transforms
 from PIL import Image
@@ -411,63 +412,82 @@ class DINOLoss(nn.Module):
 
     def koleo_loss(self, student_output):
         """
-        Kozachenko-Leonenko differential entropy regularization
-        Forces features to be uniformly distributed on the hypersphere.
+        DINOv2 Regularization: Forces uniform feature distribution.
         """
-        # 1. Normalize (already done in head, but safe to redo or ensure input is normed)
+        # 1. Normalize
         x = F.normalize(student_output, dim=-1, p=2)
         
-        # 2. Calculate pairwise distances
-        # pdist: (Batch, Batch)
+        # 2. Pairwise distances
         pdist = torch.cdist(x, x, p=2)
         
-        # 3. Handle self-distance (diagonal is 0, we want to ignore it)
-        # Add a large value to diagonal so min() doesn't pick it
+        # 3. Ignore self-distance (diagonal)
         pdist.fill_diagonal_(float('inf'))
         
-        # 4. Find distance to nearest neighbor for each point
+        # 4. Find nearest neighbor distance
         d_min, _ = pdist.min(dim=1)
         
-        # 5. Maximize the distance to nearest neighbor (minimize -log)
-        # We add a small epsilon for numerical stability
+        # 5. Maximize distance (minimize negative log)
         return -torch.log(d_min + 1e-6).mean()
 
     def forward(self, student_output, teacher_output, epoch):
-        # ... (Previous chunking logic remains the same) ...
+        """
+        Cross-Entropy between Teacher and Student + KoLeo Regularization
+        """
         # 1. Prepare Student/Teacher Logic
         student_out = student_output / self.student_temp
+        
+        # Robust Chunking (Fix for Batch Size Mismatch)
+        # Teacher always has 2 global crops. 
         batch_size = teacher_output.shape[0] // 2
         n_crops = student_output.shape[0] // batch_size
+        
         student_out_chunked = student_out.chunk(n_crops)
 
-        # Teacher centering
+        # Teacher centering & sharpening
         temp = self.teacher_temp_schedule[epoch]
         teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
         teacher_out_chunked = teacher_out.detach().chunk(2)
 
-        # --- DINO LOSS ---
-        dino_loss = 0
+        # 2. Standard DINO Loss
+        dino_loss_val = 0
         n_loss_terms = 0
         for iq, q in enumerate(teacher_out_chunked):
             for v in range(len(student_out_chunked)):
-                if v == iq: continue
+                if v == iq: continue # Skip same view
                 loss = torch.sum(-q * F.log_softmax(student_out_chunked[v], dim=-1), dim=-1)
-                dino_loss += loss.mean()
+                dino_loss_val += loss.mean()
                 n_loss_terms += 1
-        dino_loss /= n_loss_terms
+        dino_loss_val /= n_loss_terms
         
-        # --- KOLEO LOSS (NEW) ---
-        # Apply only to global crops (first 2 chunks of student output) for stability
-        # student_output contains all crops. 
-        # We can just apply it to the full batch of student outputs (or just global).
-        # DINOv2 applies it to the batch.
+        # 3. KoLeo Loss (DINOv2)
+        # Apply to all student outputs to force uniform spread
         koleo = self.koleo_loss(student_output)
         
-        # Weight: DINOv2 uses 0.1 for KoLeo
-        total_loss = dino_loss + (0.1 * koleo)
-        
+        # 4. Update Center (Multi-GPU Safe)
         self.update_center(teacher_output)
-        return total_loss
+        
+        # Weighted Sum (0.1 is standard from DINOv2 paper)
+        return dino_loss_val + (0.1 * koleo)
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """
+        Update center used for teacher output centering.
+        Multi-GPU Safe: Uses all_reduce to average across GPUs.
+        """
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        
+        # Multi-GPU Sync
+        if dist.is_initialized():
+            dist.all_reduce(batch_center)
+            len_total = len(teacher_output) * dist.get_world_size()
+        else:
+            len_total = len(teacher_output)
+            
+        batch_center = batch_center / len_total
+        
+        # EMA Update
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 # =============================================================================
 # 5. TRAINING UTILS

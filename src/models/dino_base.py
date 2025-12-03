@@ -63,7 +63,7 @@ def get_args():
 class SSLConfig:
     # --- Data ---
     output_dir: str
-    external_data: List[str] 
+    external_data: List[str] = None
     data_path: str = "./dataset"
     image_size: int = 96
     
@@ -76,8 +76,8 @@ class SSLConfig:
     lr: float = 0.0005
     weight_decay: float = 0.04
     weight_decay_end: float = 0.4
-    warmup_epochs: int = 10
-    clip_grad: float = 3.0
+    # warmup_epochs: int = 10 # repeated
+    # clip_grad: float = 3.0 # repeated
 
     patch_size: int = 8
     grad_accum_steps: int = 4  # To simulate larger batch sizes: 512 * 4 = 2048

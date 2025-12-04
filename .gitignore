@@ -95,3 +95,6 @@ venv.bak/
 
 # Data files
 dataset/
+
+# Scripts - prevent info leak
+sbatch_scripts/

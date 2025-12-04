@@ -62,8 +62,7 @@ def get_args():
 @dataclass
 class SSLConfig:
     # --- Data ---
-    output_dir: str
-    external_data: List[str] = None
+    external_data: List[str] 
     data_path: str = "./dataset"
     image_size: int = 96
     
@@ -76,8 +75,8 @@ class SSLConfig:
     lr: float = 0.0005
     weight_decay: float = 0.04
     weight_decay_end: float = 0.4
-    # warmup_epochs: int = 10 # repeated
-    # clip_grad: float = 3.0 # repeated
+    warmup_epochs: int = 10
+    clip_grad: float = 3.0
 
     patch_size: int = 8
     grad_accum_steps: int = 4  # To simulate larger batch sizes: 512 * 4 = 2048
@@ -413,15 +412,23 @@ class DINOLoss(nn.Module):
     def koleo_loss(self, student_output):
         """
         DINOv2 Regularization: Forces uniform feature distribution.
+        Fixed to avoid inplace operations that break autograd.
         """
         # 1. Normalize
         x = F.normalize(student_output, dim=-1, p=2)
         
-        # 2. Pairwise distances
+        # 2. Pairwise distances (Euclidean)
+        # Shape: (Batch, Batch)
         pdist = torch.cdist(x, x, p=2)
         
         # 3. Ignore self-distance (diagonal)
-        pdist.fill_diagonal_(float('inf'))
+        # OLD (Caused Crash): pdist.fill_diagonal_(float('inf'))
+        
+        # NEW (Safe): Add large value to diagonal using an identity matrix mask
+        # We create a new tensor instead of modifying 'pdist' in-place.
+        # 1e9 is large enough to be ignored by min() but safe for float16
+        mask = torch.eye(pdist.shape[0], device=pdist.device, dtype=torch.bool)
+        pdist = pdist.masked_fill(mask, 1e9)
         
         # 4. Find nearest neighbor distance
         d_min, _ = pdist.min(dim=1)
@@ -616,30 +623,24 @@ def train_one_epoch(student, teacher, teacher_without_ddp, loss_fn, data_loader,
         # --- LOSS ---
         loss = loss_fn(student_output, teacher_output, epoch)
 
-        # Scale loss
-        loss = loss / args.gradient_accumulation_steps 
+        # --- BACKWARD ---
+        optimizer.zero_grad()
         accelerator.backward(loss)
-
-        # Step only after N batches
-        if (it + 1) % args.gradient_accumulation_steps == 0:
-            # --- BACKWARD ---
-            optimizer.zero_grad()
-            accelerator.backward(loss)
+        
+        if args.clip_grad:
+            accelerator.clip_grad_norm_(student.parameters(), args.clip_grad)
             
-            if args.clip_grad:
-                accelerator.clip_grad_norm_(student.parameters(), args.clip_grad)
-                
-            optimizer.step()
+        optimizer.step()
 
-            # --- EMA UPDATE (THE FIX) ---
-            with torch.no_grad():
-                m = momentum_schedule[cur_iter]
-                
-                # FIX: Handle Single-GPU (no .module) vs Multi-GPU (has .module)
-                student_params = student.module.parameters() if hasattr(student, "module") else student.parameters()
-                
-                for param_q, param_k in zip(student_params, teacher_without_ddp.parameters()):
-                    param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+        # --- EMA UPDATE (THE FIX) ---
+        with torch.no_grad():
+            m = momentum_schedule[cur_iter]
+            
+            # FIX: Handle Single-GPU (no .module) vs Multi-GPU (has .module)
+            student_params = student.module.parameters() if hasattr(student, "module") else student.parameters()
+            
+            for param_q, param_k in zip(student_params, teacher_without_ddp.parameters()):
+                param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
         # --- LOGGING ---
         loss_val = loss.item()

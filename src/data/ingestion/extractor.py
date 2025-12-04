@@ -1,5 +1,6 @@
 import zipfile
 from pathlib import Path
+from tqdm import tqdm
 
 class ZipExtractor:
     def __init__(self, remove_zip: bool = False):
@@ -10,7 +11,7 @@ class ZipExtractor:
 
         # Safe extraction pattern
         with zipfile.ZipFile(zip_path, 'r') as z:
-            for member in z.namelist():
+            for member in tqdm(z.namelist()):
                 # Protect against zip-slip vulnerability
                 target_path = extract_dir / Path(member).name
                 with z.open(member) as src, open(target_path, 'wb') as dst:

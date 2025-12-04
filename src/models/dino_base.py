@@ -49,9 +49,6 @@ def get_args():
     parser.add_argument("--teacher_temp", type=float, default=0.05, help="Teacher temperature (final value)")
     parser.add_argument("--warmup_teacher_temp", type=float, default=0.05, help="Initial teacher temperature for warmup")
     parser.add_argument("--warmup_teacher_temp_epochs", type=int, default=0, help="Number of epochs for teacher temperature warmup")
-
-    # --- Gradient Accumulation (Crucial for ViT-Base) ---
-    parser.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps to simulate larger batch")
     
     return parser.parse_args()
 
@@ -79,7 +76,6 @@ class SSLConfig:
     clip_grad: float = 3.0
 
     patch_size: int = 8
-    grad_accum_steps: int = 4  # To simulate larger batch sizes: 512 * 4 = 2048
     
     # Defaults for ViT-Base
     arch: str = "vit_base" 

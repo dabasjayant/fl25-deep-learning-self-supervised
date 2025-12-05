@@ -52,6 +52,7 @@ def get_args():
 
     # --- Gradient Accumulation (Crucial for ViT-Base) ---
     parser.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps to simulate larger batch")
+    parser.add_argument("--warmup_epochs", type=int, default=10, help="Number of warmup epochs for learning rate scheduler")
     
     return parser.parse_args()
 

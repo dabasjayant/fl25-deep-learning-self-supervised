@@ -183,12 +183,18 @@ class ImageFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.files[idx]
-        with open(path, 'rb') as f:
-            img = Image.open(f).convert('RGB')
-        if self.transform:
-            img = self.transform(img)
-        return img
-    
+        try:
+            with open(path, 'rb') as f:
+                img = Image.open(f).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img
+        except (PIL.UnidentifiedImageError, OSError) as e:
+            # Skip corrupted images by returning a random valid image
+            print(f"Warning: Corrupted image {path}, using random replacement")
+            new_idx = random.randint(0, len(self.files) - 1)
+            return self.__getitem__(new_idx)
+            
 # =============================================================================
 # 2.2 MIXED DATASET LOADING FROM MULTIPLE SOURCES
 # =============================================================================

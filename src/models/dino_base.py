@@ -28,7 +28,10 @@ def get_args():
     # --- Critical System Params ---
     parser.add_argument("--data_path", type=str, required=True, help="Path to folder containing images")
     parser.add_argument("--output_dir", type=str, default="./checkpoints_ssl", help="Where to save weights")
-    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from (e.g., './checkpoints_ssl/checkpoint_epoch_010.pth')")
+
+    # --- Checkpoint Handling ---
+    parser.add_argument("--resume", type=str, default=None, help="RESUME: Restore state (weights, optimizer, epoch) to continue interrupted run.")
+    parser.add_argument("--restart", type=str, default=None, help="RESTART: Load weights only (reset epoch/optimizer) to start fresh training.")
 
     # --- External Data Argument ---
     parser.add_argument("--external_data", type=str, nargs='*', default=None, help="List of additional image folders (e.g., --external_data ./inat ./places)")
@@ -48,7 +51,9 @@ def get_args():
     # Teacher temperature schedule
     parser.add_argument("--teacher_temp", type=float, default=0.05, help="Teacher temperature (final value)")
     parser.add_argument("--warmup_teacher_temp", type=float, default=0.05, help="Initial teacher temperature for warmup")
-    parser.add_argument("--warmup_teacher_temp_epochs", type=int, default=0, help="Number of epochs for teacher temperature warmup")
+    parser.add_argument("--warmup_teacher_temp_epochs", type=int, default=20, help="Number of epochs for teacher temperature warmup")
+
+    parser.add_argument("--warmup_epochs", type=int, default=20, help="Number of warmup epochs for learning rate scheduler")
     
     return parser.parse_args()
 
@@ -72,7 +77,7 @@ class SSLConfig:
     lr: float = 0.0005
     weight_decay: float = 0.04
     weight_decay_end: float = 0.4
-    warmup_epochs: int = 10
+    warmup_epochs: int = 20
     clip_grad: float = 3.0
 
     patch_size: int = 8
@@ -84,8 +89,6 @@ class SSLConfig:
     norm_last_layer: bool = True
     momentum_teacher: float = 0.995
     min_lr: float = 1e-6
-    warmup_epochs: int = 10
-    clip_grad: float = 3.0
     
     # Multi-Crop Config (Optimized)
     local_crops_number: int = 8
@@ -660,7 +663,8 @@ def main():
         weight_decay=args.weight_decay,
         image_size=args.image_size,
         patch_size=args.patch_size,
-        save_freq=args.save_freq
+        save_freq=args.save_freq,
+        warmup_epochs=args.warmup_epochs
     )
     
     # Initialize Accelerator
@@ -724,33 +728,51 @@ def main():
         nepochs=cfg.epochs
     ).to(accelerator.device)
 
-    # --- RESUME LOGIC ---
+    # --- RESUME / RESTART LOGIC ---
     start_epoch = 0
-    if args.resume:
-        if os.path.isfile(args.resume):
-            logger.info(f"==> Resuming from checkpoint: {args.resume}")
-            # Map location is crucial to avoid OOM by loading everything to CPU first
-            checkpoint = torch.load(args.resume, map_location='cpu')
+
+    if args.resume and os.path.isfile(args.resume):
+        # CASE 1: RESUME (Crash Recovery)
+        # We load EVERYTHING: Weights, Optimizer, Scheduler, Epoch
+        logger.info(f"==> Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        
+        start_epoch = checkpoint['epoch'] + 1
+        
+        # Load Weights
+        load_state_dict_robust(student, checkpoint['student'])
+        load_state_dict_robust(teacher, checkpoint['teacher'])
+        
+        # Load Optimizer
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+        except ValueError as e:
+            logger.warning(f"Optimizer load failed (likely device mismatch or param change). Starting optimizer fresh. Error: {e}")
             
-            # 1. Load Epoch
-            start_epoch = checkpoint['epoch'] + 1
-            
-            # 2. Load Models (Robustly)
-            # Student is wrapped by Accelerate, Teacher is not.
+        logger.info(f"==> Resumed successfully! Continuing from Epoch {start_epoch}")
+
+    elif args.restart and os.path.isfile(args.restart):
+        # CASE 2: RESTART (Warm Start / Finetuning)
+        # We load ONLY WEIGHTS. Epoch resets to 0. Optimizer is fresh.
+        logger.info(f"==> Restarting training from weights: {args.restart}")
+        checkpoint = torch.load(args.restart, map_location='cpu')
+        
+        # Load Weights
+        # Check if the checkpoint has 'student' key (DINO format) or just raw weights
+        if 'student' in checkpoint:
             load_state_dict_robust(student, checkpoint['student'])
             load_state_dict_robust(teacher, checkpoint['teacher'])
-            
-            # 3. Load Optimizer
-            # Accelerate handles optimizer mapping, but we must load the state dict
-            # Standard PyTorch load works fine here because we are post-prepare
-            try:
-                optimizer.load_state_dict(checkpoint['optimizer'])
-            except ValueError as e:
-                logger.warning(f"Optimizer load failed (likely device mismatch or param change). Skipping optimizer resume. Error: {e}")
-            
-            logger.info(f"==> Resumed successfully! Starting from Epoch {start_epoch}")
         else:
-            logger.warning(f"==> Resume file not found at {args.resume}. Starting from scratch.")
+            # Fallback for generic checkpoints (assuming it's just the backbone)
+            logger.info("Checkpoint appears to be raw weights (no student/teacher keys). Loading into student/teacher...")
+            load_state_dict_robust(student, checkpoint)
+            load_state_dict_robust(teacher, checkpoint)
+            
+        logger.info(f"==> Weights loaded. Epoch count reset to 0. Optimizer reset.")
+        start_epoch = 0
+
+    else:
+        logger.info("==> Starting training from scratch (Random Init).")
     
     # Schedulers
     n_iter = len(data_loader)

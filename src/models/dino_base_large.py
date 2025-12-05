@@ -88,8 +88,6 @@ class SSLConfig:
     norm_last_layer: bool = True
     momentum_teacher: float = 0.995
     min_lr: float = 1e-6
-    warmup_epochs: int = 10
-    clip_grad: float = 3.0
     
     # Multi-Crop Config (Optimized)
     local_crops_number: int = 8
@@ -642,7 +640,8 @@ def main():
         image_size=args.image_size,
         patch_size=args.patch_size,
         save_freq=args.save_freq,
-        grad_accum_steps=args.grad_accum_steps
+        grad_accum_steps=args.grad_accum_steps,
+        warmup_epochs=args.warmup_epochs        
     )
     
     # Initialize Accelerator
@@ -679,9 +678,9 @@ def main():
     student = get_model(cfg)
     teacher = get_model(cfg)
     
-    # Move to device immediately to ensure weights are same
-    student = student.to(accelerator.device)
-    teacher = teacher.to(accelerator.device)
+    # Move to device immediately to ensure weights are same -> fix device placement
+    # student = student.to(accelerator.device)
+    # teacher = teacher.to(accelerator.device)
     
     # Teacher needs no gradients
     for p in teacher.parameters():
@@ -700,7 +699,10 @@ def main():
     # Prepare with Accelerate
     # NOTE: We do NOT prepare the teacher. We manage teacher manually via EMA.
     student, optimizer, data_loader = accelerator.prepare(student, optimizer, data_loader)
-    
+
+    # Now move teacher to the same device as student (after prepare)
+    teacher = teacher.to(accelerator.device)
+
     # Loss
     dino_loss = DINOLoss(
         cfg.out_dim, 

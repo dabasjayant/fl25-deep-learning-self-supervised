@@ -15,6 +15,7 @@ import numpy as np
 from tqdm import tqdm
 from timm.models.vision_transformer import VisionTransformer
 
+
 # ============================================================================
 # 1. MODEL & BACKBONE
 # ============================================================================
@@ -131,51 +132,74 @@ def precompute_features(backbone, loader, device, desc):
 # 3. TRAINING LOGIC (Strict Mini-Batch)
 # ============================================================================
 
-def train_one_config(X_train, y_train, X_val, y_val, input_dim, num_classes, config, device):
+def train_one_config_fast(X_train, y_train, X_val, y_val, input_dim, num_classes, config, device, max_epochs=500, patience=20):
     lr = config['lr']
     wd = config['wd']
     opt_name = config['opt']
-    epochs = config['epochs']
     batch_size = config['bs'] 
     
     probe = LinearProbe(input_dim, num_classes).to(device)
     
-    if opt_name == 'adamw':
-        optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=wd)
-    elif opt_name == 'sgd':
-        optimizer = torch.optim.SGD(probe.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
-        
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.CrossEntropyLoss()
+    # Label Smoothing: Helps model generalize better
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     
+    # --- OPTIMIZER SELECTION ---
+    if opt_name == 'lbfgs':
+        # L-BFGS requires Full Batch (usually) and strong history
+        # We enforce batch_size='full' logic inside the loop later
+        optimizer = torch.optim.LBFGS(probe.parameters(), lr=lr, max_iter=20, history_size=10, line_search_fn="strong_wolfe")
+        # L-BFGS generally doesn't use a scheduler in the same way, but we can keep it
+        scheduler = None 
+    elif opt_name == 'adamw':
+        optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=wd)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
+    elif opt_name == 'sgd':
+        # Added Nesterov=True
+        optimizer = torch.optim.SGD(probe.parameters(), lr=lr, weight_decay=wd, momentum=0.9, nesterov=True)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
+
     best_acc = 0.0
     best_state = None
-    
+    patience_counter = 0
     n_samples = X_train.shape[0]
-    
-    for epoch in range(epochs):
+
+    # --- TRAINING LOOP ---
+    for epoch in range(max_epochs):
         probe.train()
         
-        # Efficient Manual Mini-Batch Loop on GPU
-        indices = torch.randperm(n_samples, device=device)
-        
-        for start in range(0, n_samples, batch_size):
-            end = start + batch_size
-            batch_idx = indices[start:end]
+        # LOGIC SPLIT: L-BFGS vs Standard
+        if opt_name == 'lbfgs':
+            # L-BFGS Logic: Needs a Closure and Full Batch
+            def closure():
+                optimizer.zero_grad()
+                output = probe(X_train)
+                loss = criterion(output, y_train)
+                loss.backward()
+                return loss
             
-            x_batch = X_train[batch_idx]
-            y_batch = y_train[batch_idx]
+            # Performs multiple optimization steps internally
+            optimizer.step(closure)
             
-            optimizer.zero_grad()
-            outputs = probe(x_batch)
-            loss = criterion(outputs, y_batch)
-            loss.backward()
-            optimizer.step()
+        else:
+            # Standard Mini-Batch Logic (AdamW / SGD)
+            indices = torch.randperm(n_samples, device=device)
+            current_bs = n_samples if batch_size == 'full' else batch_size
+            
+            for start in range(0, n_samples, current_bs):
+                end = start + current_bs
+                batch_idx = indices[start:end]
+                
+                optimizer.zero_grad()
+                outputs = probe(X_train[batch_idx])
+                loss = criterion(outputs, y_train[batch_idx])
+                loss.backward()
+                optimizer.step()
+            
+            if scheduler:
+                scheduler.step()
 
-        scheduler.step()
-        
-        # Evaluate
-        if (epoch + 1) % 10 == 0 or (epoch + 1) == epochs:
+        # --- EVALUATION ---
+        if (epoch + 1) % 5 == 0:
             probe.eval()
             with torch.no_grad():
                 val_out = probe(X_val)
@@ -185,8 +209,14 @@ def train_one_config(X_train, y_train, X_val, y_val, input_dim, num_classes, con
                 if acc > best_acc:
                     best_acc = acc
                     best_state = copy.deepcopy(probe.state_dict())
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+            
+            if patience_counter >= (patience // 5):
+                break
                     
-    return best_acc, best_state
+    return best_acc, best_state, epoch + 1
 
 # ============================================================================
 # 4. MAIN
@@ -196,9 +226,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--output", type=str, default="submission_linear.csv")
+    parser.add_argument("--output", type=str, default="submission_linear_lbfgs.csv")
     parser.add_argument("--arch", type=str, default="vit_base")
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=256) # For loading from disk
+    parser.add_argument("--max_epochs", type=int, default=300)
+    parser.add_argument("--patience", type=int, default=40)
     args = parser.parse_args()
     
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -234,43 +266,61 @@ def main():
     input_dim = X_train.shape[1]
 
     # =========================================================
-    # PARAMETER GRID (Mini-Batch Only)
+    # PARAMETER GRID WITH L-BFGS
     # =========================================================
     
-    param_space = {
-        'lr': [1e-4, 5e-4, 1e-3, 5e-3, 0.01, 0.1, 0.5],       # Add high LR for SGD
-        'wd': [1e-5, 1e-4, 1e-3, 1e-2, 0.5],
-        'opt': ['adamw', 'sgd'],                  # Compare Optimizers
-        'epochs': [50, 100, 200, 300, 500],             # Short vs Long training
-        'bs': [32, 64, 128]
+    # 1. Standard Configs (Mini-Batch)
+    param_space_standard = {
+        'opt': ['adamw', 'sgd'],
+        'lr': [1e-4, 5e-4, 1e-3, 5e-3, 0.01, 0.1, 0.5],
+        'wd': [1e-5, 1e-4, 1e-3, 1e-2],
+        'bs': [64, 128, 256, 512, 1024]
     }
     
-    keys, values = zip(*param_space.items())
-    configs = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    # 2. L-BFGS Configs (Must be Full Batch, LR usually 1.0 or 0.1)
+    param_space_lbfgs = {
+        'opt': ['lbfgs'],
+        'lr': [1.0, 0.5, 0.1, 0.05, 0.01], # LBFGS takes big steps
+        'wd': [1e-5, 1e-4, 1e-3, 1e-2],
+        'bs': ['full'] # Forced full batch
+    }
+    
+    # Combine the grids
+    keys_s, values_s = zip(*param_space_standard.items())
+    configs_s = [dict(zip(keys_s, v)) for v in itertools.product(*values_s)]
+    
+    keys_l, values_l = zip(*param_space_lbfgs.items())
+    configs_l = [dict(zip(keys_l, v)) for v in itertools.product(*values_l)]
+    
+    configs = configs_s + configs_l # Test everything
     
     print("\n" + "="*60)
     print(f"STARTING GRID SEARCH: {len(configs)} configurations")
+    print("Including L-BFGS (The Convex Solver)!")
     print("="*60)
     
     results = []
     
     for config in tqdm(configs, desc="Tuning"):
-        # Pruning heuristics to save time
+        # Heuristics
         if config['opt'] == 'adamw' and config['lr'] > 0.01: continue
         if config['opt'] == 'sgd' and config['lr'] < 0.001: continue
         
-        acc, state = train_one_config(
+        acc, state, stops_at = train_one_config_fast(
             X_train, y_train, X_val, y_val, 
             input_dim, num_classes, 
-            config, device
+            config, device, 
+            max_epochs=args.max_epochs, 
+            patience=args.patience
         )
         
         config['acc'] = acc
         config['state'] = state
+        config['epochs'] = stops_at
         results.append(config)
         
-        # tqdm.write(f"Opt: {config['opt']:<5} | BS: {config['bs']:<5} | LR: {config['lr']:<6} | WD: {config['wd']:<7} | Acc: {acc*100:.2f}%")
-            
+        # tqdm.write(f"Opt: {config['opt']:<6} | BS: {str(config['bs']):<5} | LR: {config['lr']:<6} | WD: {config['wd']:<6} | Acc: {acc*100:.2f}%")
+
     # Leaderboard
     results.sort(key=lambda x: x['acc'], reverse=True)
     winner = results[0]
